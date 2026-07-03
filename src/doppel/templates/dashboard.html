@@ -12,6 +12,10 @@
     <div class="label"><a href="/groups?tier={{ tier }}">{{ tier }} groups</a></div>
   </div>
   {% endfor %}
+  <div class="card">
+    <div class="big">{{ trash_count }}</div>
+    <div class="label"><a href="/export">marked for trash &darr;</a></div>
+  </div>
 </div>
 
 <h2>Scans</h2>

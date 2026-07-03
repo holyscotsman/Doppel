@@ -12,6 +12,7 @@ dependencies = [
     "open-clip-torch>=3.3.0",
     "pillow>=12.3.0",
     "pybktree>=1.1",
+    "python-multipart>=0.0.32",
     "requests>=2.34.2",
     "sqlite-vec>=0.1.9",
     "uvicorn>=0.49.0",

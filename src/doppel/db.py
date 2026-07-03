@@ -59,8 +59,13 @@ CREATE TABLE IF NOT EXISTS scans (
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
-    """Open a connection with sane defaults and the schema applied."""
-    conn = sqlite3.connect(db_path)
+    """Open a connection with sane defaults and the schema applied.
+
+    check_same_thread=False: FastAPI resolves sync dependencies in a
+    threadpool thread while async routes run on the event loop; each
+    connection is still used by one request at a time.
+    """
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

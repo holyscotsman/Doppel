@@ -6,10 +6,15 @@
   {% if group.color_variant %}<span class="badge">color variant</span>{% endif %}
 </h2>
 <p><a href="/groups?tier={{ group.tier }}">&larr; back to {{ group.tier }} groups</a></p>
+<form method="post" action="/groups/{{ group.id }}/decisions">
 <div class="members">
   {% for p in members %}
   <div class="member">
     <img class="thumb-lg" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+    <div class="decision">
+      <label><input type="radio" name="action_{{ p.id }}" value="keep" {% if selected[p.id] == 'keep' %}checked{% endif %}> keep</label>
+      <label><input type="radio" name="action_{{ p.id }}" value="trash" {% if selected[p.id] == 'trash' %}checked{% endif %}> trash</label>
+    </div>
     <dl>
       <dt>name</dt><dd>{{ p.name }}</dd>
       <dt>dimensions</dt><dd>{% if p.width %}{{ p.width }} &times; {{ p.height }}{% else %}?{% endif %}</dd>
@@ -22,4 +27,6 @@
   </div>
   {% endfor %}
 </div>
+<p><button type="submit">save decisions</button></p>
+</form>
 {% endblock %}

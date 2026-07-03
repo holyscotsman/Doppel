@@ -8,7 +8,12 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -16,7 +21,7 @@ from doppel.config import Config, load_config
 from doppel.db import connect
 from doppel.drive import GoogleDriveClient, ImageFetcher, get_credentials
 from doppel.embed import ClipEmbedder, Embedder
-from doppel.jobs import JobRunner, run_sync
+from doppel.jobs import JobRunner, now, run_sync
 from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
@@ -125,12 +130,16 @@ def create_app(
                 "SELECT tier, COUNT(*) AS n FROM groups GROUP BY tier"
             )
         }
+        trash_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions WHERE action = 'trash'"
+        ).fetchone()["n"]
         return templates.TemplateResponse(
             request,
             "dashboard.html",
             {
                 "photo_count": photo_count,
                 "tier_counts": tier_counts,
+                "trash_count": trash_count,
                 "scans": scan_overview(conn),
             },
         )
@@ -173,19 +182,31 @@ def create_app(
         request: Request,
         tier: str = "exact",
         page: int = 1,
+        reviewed: str = "all",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
+        having = {
+            "all": "",
+            "yes": "HAVING decided = members",
+            "no": "HAVING decided < members",
+        }.get(reviewed)
+        if having is None:
+            raise HTTPException(status_code=422, detail="reviewed must be all|yes|no")
+        base_query = f"""
+            SELECT g.id, g.tier, g.color_variant,
+                   COUNT(m.photo_id) AS members,
+                   COUNT(d.photo_id) AS decided
+            FROM groups g
+            JOIN group_members m ON m.group_id = g.id
+            LEFT JOIN decisions d ON d.photo_id = m.photo_id
+            WHERE g.tier = ?
+            GROUP BY g.id {having}
+        """  # noqa: S608 — `having` comes from the fixed map above
         total = conn.execute(
-            "SELECT COUNT(*) AS n FROM groups WHERE tier = ?", (tier,)
+            f"SELECT COUNT(*) AS n FROM ({base_query})", (tier,)
         ).fetchone()["n"]
         groups = conn.execute(
-            """
-            SELECT g.id, g.tier, g.color_variant, COUNT(m.photo_id) AS members
-            FROM groups g JOIN group_members m ON m.group_id = g.id
-            WHERE g.tier = ?
-            GROUP BY g.id ORDER BY g.id
-            LIMIT ? OFFSET ?
-            """,
+            f"{base_query} ORDER BY g.id LIMIT ? OFFSET ?",
             (tier, PAGE_SIZE, (page - 1) * PAGE_SIZE),
         ).fetchall()
         strips = {
@@ -208,6 +229,7 @@ def create_app(
                 "page": page,
                 "pages": max(1, -(-total // PAGE_SIZE)),
                 "total": total,
+                "reviewed": reviewed,
             },
         )
 
@@ -230,8 +252,95 @@ def create_app(
             """,
             (group_id,),
         ).fetchall()
+        decisions = {
+            row["photo_id"]: row["action"]
+            for row in conn.execute(
+                """
+                SELECT d.photo_id, d.action FROM decisions d
+                JOIN group_members m ON m.photo_id = d.photo_id
+                WHERE m.group_id = ?
+                """,
+                (group_id,),
+            )
+        }
+        # default preselect: keep the largest file (first row), trash the rest;
+        # the user's saved decisions override
+        selected = {
+            p["id"]: decisions.get(p["id"], "keep" if i == 0 else "trash")
+            for i, p in enumerate(members)
+        }
         return templates.TemplateResponse(
-            request, "group_detail.html", {"group": group, "members": members}
+            request,
+            "group_detail.html",
+            {"group": group, "members": members, "selected": selected},
+        )
+
+    @app.post("/groups/{group_id}/decisions")
+    async def save_decisions(
+        request: Request,
+        group_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        member_ids = {
+            row["photo_id"]
+            for row in conn.execute(
+                "SELECT photo_id FROM group_members WHERE group_id = ?",
+                (group_id,),
+            )
+        }
+        if not member_ids:
+            raise HTTPException(status_code=404, detail="no such group")
+        form = await request.form()
+        for key, action in form.items():
+            if not key.startswith("action_"):
+                continue
+            if action not in ("keep", "trash"):
+                raise HTTPException(
+                    status_code=422, detail=f"invalid action {action!r}"
+                )
+            photo_id = int(key.removeprefix("action_"))
+            if photo_id not in member_ids:
+                continue  # stale or foreign field: ignore
+            conn.execute(
+                """
+                INSERT INTO decisions (photo_id, action, decided_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                  action = excluded.action, decided_at = excluded.decided_at
+                """,
+                (photo_id, action, now()),
+            )
+        conn.commit()
+        return RedirectResponse(url=f"/groups/{group_id}", status_code=303)
+
+    @app.get("/export")
+    def export_csv(conn: sqlite3.Connection = Depends(get_conn)):
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["drive_id", "name", "size", "md5", "url"])
+        for row in conn.execute(
+            """
+            SELECT p.drive_id, p.name, p.size, p.md5 FROM decisions d
+            JOIN photos p ON p.id = d.photo_id
+            WHERE d.action = 'trash' ORDER BY p.name
+            """
+        ):
+            writer.writerow(
+                [
+                    row["drive_id"],
+                    row["name"],
+                    row["size"],
+                    row["md5"],
+                    f"https://drive.google.com/file/d/{row['drive_id']}/view",
+                ]
+            )
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=doppel-trash.csv"},
         )
 
     @app.get("/thumb/{photo_id}")
