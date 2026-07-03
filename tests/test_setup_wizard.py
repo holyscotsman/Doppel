@@ -122,8 +122,11 @@ def wizard(tmp_path, monkeypatch):
 def test_setup_page_shows_disconnected_state(wizard) -> None:
     page = wizard.get("/setup")
     assert page.status_code == 200
-    assert "not connected" in page.text
-    assert "gemma3:27b" in page.text  # models listed from the fake Ollama
+    assert "not connected" in page.text  # Drive not connected yet
+    # a plain load must NOT probe Ollama (would stall on a slow host); the
+    # dropdown appears only after an explicit test
+    assert "gemma3:27b" not in page.text
+    assert "test-model" in page.text  # the saved model is shown instead
 
 
 def test_dashboard_banners_until_authorized(wizard, tmp_path) -> None:
@@ -582,3 +585,28 @@ def test_upload_shown_only_before_client_present(wizard):
     page = wizard.get("/setup")  # no credentials.json in this tmp cwd
     assert 'action="/setup/credentials"' in page.text  # upload form
     assert 'action="/oauth/start"' not in page.text  # no sign-in until configured
+
+
+def test_plain_setup_load_does_not_probe_ollama(tmp_path, monkeypatch):
+    """Auto-opened /setup must not block on Ollama; probe only on test."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    calls: list[str] = []
+
+    def counting_lister(host):
+        calls.append(host)
+        return ["gemma3:27b"]
+
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        ollama_lister=counting_lister,
+    )
+    with TestClient(app) as client:
+        client.get("/setup")  # plain load
+        assert calls == []  # no probe
+        client.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
+        assert calls == ["http://127.0.0.1:11434"]  # probe only on test

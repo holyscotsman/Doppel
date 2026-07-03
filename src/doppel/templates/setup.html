@@ -37,7 +37,7 @@
 
 <div class="setup-step">
   <h3>2. Local LLM (Ollama)
-    {% if models and saved_model in models %}<span class="badge badge-ok">{{ saved_model }}</span>{% endif %}
+    {% if saved_model %}<span class="badge badge-ok">{{ saved_model }}</span>{% endif %}
   </h3>
   <form method="get" action="/setup" class="decision">
     <input type="text" name="ollama_host" value="{{ host }}" size="30">
@@ -47,8 +47,6 @@
     <p class="{{ 'ok' if ollama_status.ok else 'error' }}">
       {{ '✓' if ollama_status.ok else '✕' }} {{ ollama_status.message }}
     </p>
-  {% elif ollama_status and not ollama_status.ok %}
-    <p class="muted">{{ ollama_status.message }}</p>
   {% endif %}
   {% if models %}
   <form method="post" action="/setup/ollama" class="decision">
@@ -62,6 +60,9 @@
   </form>
   <p class="muted">Only models that can compare a pair of images are listed —
     that’s what the duplicate-adjudication step needs.</p>
+  {% elif not tested %}
+  <p class="muted">Saved model: <strong>{{ saved_model }}</strong>. Click
+    “test connection” to verify it and pick from your installed models.</p>
   {% endif %}
 </div>
 

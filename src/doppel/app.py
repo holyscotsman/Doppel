@@ -115,10 +115,12 @@ def _list_ollama_models(host: str) -> list[str]:
     """Usable models on an Ollama server. Raises if the host is unreachable.
 
     A short timeout keeps /setup from hanging when the host is down (ollama's
-    client defaults to no timeout)."""
+    client defaults to no timeout); the client is closed so its connection
+    pool doesn't leak across probes."""
     import ollama
 
-    return _usable_models(ollama.Client(host=host, timeout=5))
+    with ollama.Client(host=host, timeout=5) as client:
+        return _usable_models(client)
 
 
 def create_app(
@@ -298,22 +300,25 @@ def create_app(
         tested = ollama_host is not None  # arrived via the "test connection" form
         models: list[str] | None = None
         ollama_status: dict | None = None
-        try:
-            models = ollama_lister(host)
-            if models:
-                ollama_status = {
-                    "ok": True,
-                    "message": f"Test successful — {len(models)} usable "
-                    f"model{'s' if len(models) != 1 else ''} found.",
-                }
-            else:
-                ollama_status = {
-                    "ok": False,
-                    "message": "Connected, but no multi-image vision models are "
-                    "installed. Pull one, e.g. `ollama pull gemma3`.",
-                }
-        except Exception as exc:
-            ollama_status = {"ok": False, "message": f"Test failed: {exc}"}
+        # only probe Ollama on an explicit test — a plain page load (incl. the
+        # one `make run` auto-opens) must never block on a slow/absent host
+        if tested:
+            try:
+                models = ollama_lister(host)
+                if models:
+                    ollama_status = {
+                        "ok": True,
+                        "message": f"Test successful — {len(models)} usable "
+                        f"model{'s' if len(models) != 1 else ''} found.",
+                    }
+                else:
+                    ollama_status = {
+                        "ok": False,
+                        "message": "Connected, but no multi-image vision models "
+                        "are installed. Pull one, e.g. `ollama pull gemma3`.",
+                    }
+            except Exception as exc:
+                ollama_status = {"ok": False, "message": f"Test failed: {exc}"}
         return templates.TemplateResponse(
             request,
             "setup.html",
