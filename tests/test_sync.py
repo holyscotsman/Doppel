@@ -123,7 +123,7 @@ def test_sync_handles_files_without_optional_fields(conn) -> None:
 
 def test_interrupt_marks_scan_failed(conn) -> None:
     class InterruptingClient:
-        def list_images_page(self, page_token=None):
+        def list_images_page(self, page_token=None, parent_ids=None):
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):

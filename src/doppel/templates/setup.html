@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}setup — doppel{% endblock %}
+{% block content %}
+<h2>Setup</h2>
+{% if msg %}<p class="ok">{{ msg }}</p>{% endif %}
+{% if err %}<p class="error">{{ err }}</p>{% endif %}
+
+<div class="setup-step">
+  <h3>1. Google Drive
+    {% if authorized %}<span class="badge badge-ok">connected</span>
+    {% elif credentials_present %}<span class="badge">credentials uploaded — authorize below</span>
+    {% else %}<span class="badge badge-todo">not connected</span>{% endif %}
+  </h3>
+  {% if not credentials_present %}
+  <p class="muted">
+    Create an <strong>OAuth client ID</strong> of type <strong>Desktop app</strong> in
+    <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a>
+    (enable the Google Drive API first), download the JSON, and upload it here.
+    It never leaves this machine and only read-only Drive access is requested.
+  </p>
+  {% endif %}
+  <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
+    <input type="file" name="credentials" accept=".json,application/json" required>
+    <button type="submit">upload credentials.json</button>
+  </form>
+  {% if credentials_present %}
+  <p><a href="/oauth/start"><button type="button">
+    {% if authorized %}re-authorize with Google{% else %}authorize with Google{% endif %}
+  </button></a></p>
+  {% endif %}
+</div>
+
+<div class="setup-step">
+  <h3>2. Local LLM (Ollama)
+    {% if models and saved_model in models %}<span class="badge badge-ok">{{ saved_model }}</span>
+    {% elif ollama_error %}<span class="badge badge-todo">unreachable</span>{% endif %}
+  </h3>
+  <form method="get" action="/setup" class="decision">
+    <input type="text" name="ollama_host" value="{{ host }}" size="30">
+    <button type="submit">test connection</button>
+  </form>
+  {% if ollama_error %}
+  <p class="error">{{ ollama_error }}</p>
+  <p class="muted">Is Ollama running? Start it and press “test connection”.</p>
+  {% elif models is not none %}
+  {% if models %}
+  <form method="post" action="/setup/ollama" class="decision">
+    <input type="hidden" name="host" value="{{ host }}">
+    <select name="model">
+      {% for m in models %}
+      <option value="{{ m }}" {% if m == saved_model %}selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">save model</button>
+  </form>
+  <p class="muted">Pick a vision model that accepts multiple images per prompt
+    (e.g. gemma3, qwen3-vl). Plain text models will fail at the adjudicate/brand stages.</p>
+  {% else %}
+  <p class="error">Ollama is reachable but has no models — run <code>ollama pull gemma3</code> first.</p>
+  {% endif %}
+  {% endif %}
+</div>
+
+<div class="setup-step">
+  <h3>3. Scan scope
+    {% if folder_id %}<span class="badge badge-ok">folder {{ folder_id }}</span>
+    {% else %}<span class="badge badge-ok">entire Drive</span>{% endif %}
+  </h3>
+  <p class="muted">Paste a Drive folder link (…/drive/folders/&lt;id&gt;) to scan only
+    that folder and its subfolders, or leave empty to scan every image in Drive.
+    Requires step 1 first so the folder can be verified.</p>
+  <form method="post" action="/setup/folder" class="decision">
+    <input type="text" name="folder" value="{{ folder_id }}" size="50"
+           placeholder="https://drive.google.com/drive/folders/…  (empty = whole Drive)">
+    <button type="submit">save scope</button>
+  </form>
+</div>
+
+<p><a href="/">&larr; back to dashboard</a></p>
+{% endblock %}

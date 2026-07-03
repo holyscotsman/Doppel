@@ -19,7 +19,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from doppel.config import Config, load_config
+from doppel.config import Config, load_config, set_config_value
 from doppel.db import connect
 from doppel.drive import (
     CredentialsRequired,
@@ -27,6 +27,8 @@ from doppel.drive import (
     GoogleDriveClient,
     ImageFetcher,
     get_credentials,
+    parse_folder_input,
+    web_auth_flow,
 )
 from doppel.embed import ClipEmbedder, Embedder
 from doppel.jobs import (
@@ -66,18 +68,43 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
     )
 
 
+def _list_ollama_models(host: str) -> list[str]:
+    """Model names installed on an Ollama server. Raises on unreachable."""
+    import ollama
+
+    response = ollama.Client(host=host).list()
+    models = getattr(response, "models", None) or response.get("models", [])
+    names = []
+    for m in models:
+        name = getattr(m, "model", None) or m.get("model") or m.get("name")
+        if name:
+            names.append(name)
+    return names
+
+
 def create_app(
     config: Config | None = None,
     fetcher_factory: Callable[[Config], ImageFetcher] | None = None,
     embedder_factory: Callable[[Config], Embedder] | None = None,
     vlm_factory: Callable[[Config], VlmClient] | None = None,
+    config_path: Path | str = "config.toml",
+    oauth_flow_factory: Callable[[str], object] | None = None,
+    ollama_lister: Callable[[str], list[str]] | None = None,
+    drive_client_factory: Callable[[], GoogleDriveClient] | None = None,
 ) -> FastAPI:
     """Build the app. Tests inject a Config and fake factories."""
-    config = config or load_config()
+    config = config or load_config(config_path)
     fetcher_factory = fetcher_factory or _build_real_fetcher
     embedder_factory = embedder_factory or (lambda cfg: ClipEmbedder(cfg.clip_model))
     vlm_factory = vlm_factory or (
         lambda cfg: OllamaClient(cfg.ollama.host, cfg.ollama.model)
+    )
+    oauth_flow_factory = oauth_flow_factory or (
+        lambda redirect_uri: web_auth_flow("credentials.json", redirect_uri)
+    )
+    ollama_lister = ollama_lister or _list_ollama_models
+    drive_client_factory = drive_client_factory or (
+        lambda: GoogleDriveClient(get_credentials(allow_interactive=False))
     )
 
     app = FastAPI(title="doppel")
@@ -86,6 +113,17 @@ def create_app(
     app.state.fetcher = None  # built lazily: needs OAuth credentials
     app.state.embedder = None  # built lazily: loads the CLIP model
     app.state.vlm = None  # built lazily: needs the Ollama server
+    app.state.oauth = None  # in-flight wizard OAuth state
+
+    def reload_config() -> None:
+        """Re-read config.toml after the wizard writes it and drop lazy
+        singletons built from the old settings."""
+        nonlocal config
+        config = load_config(config_path)
+        app.state.config = config
+        app.state.fetcher = None
+        app.state.embedder = None
+        app.state.vlm = None
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     app.mount(
@@ -163,7 +201,10 @@ def create_app(
                 if stage == "sync":
                     creds = get_credentials(allow_interactive=False)
                     client = GoogleDriveClient(creds)
-                    job = lambda: run_sync(conn, client, config.cache_dir)  # noqa: E731
+                    folder = config.drive_folder_id or None
+                    job = lambda: run_sync(  # noqa: E731
+                        conn, client, config.cache_dir, folder
+                    )
                 elif stage == "exact":
                     job = lambda: run_exact(conn)  # noqa: E731
                 elif stage == "near":
@@ -189,6 +230,159 @@ def create_app(
         finally:
             conn.close()
 
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup(
+        request: Request,
+        msg: str | None = None,
+        err: str | None = None,
+        ollama_host: str | None = None,
+    ):
+        host = ollama_host or config.ollama.host
+        models: list[str] | None = None
+        ollama_error = None
+        try:
+            models = ollama_lister(host)
+        except Exception as exc:
+            ollama_error = f"cannot reach Ollama at {host}: {exc}"
+        return templates.TemplateResponse(
+            request,
+            "setup.html",
+            {
+                "msg": msg,
+                "err": err,
+                "credentials_present": Path("credentials.json").exists(),
+                "authorized": Path("token.json").exists(),
+                "host": host,
+                "saved_host": config.ollama.host,
+                "saved_model": config.ollama.model,
+                "models": models,
+                "ollama_error": ollama_error,
+                "folder_id": config.drive_folder_id,
+            },
+        )
+
+    @app.post("/setup/credentials")
+    async def upload_credentials(request: Request):
+        import json as _json
+
+        form = await request.form()
+        upload = form.get("credentials")
+        if upload is None or not hasattr(upload, "read"):
+            return RedirectResponse("/setup?err=no+file+uploaded", status_code=303)
+        data = await upload.read()
+        try:
+            parsed = _json.loads(data)
+        except ValueError:
+            parsed = {}
+        if "installed" not in parsed and "web" not in parsed:
+            return RedirectResponse(
+                "/setup?err=that+file+is+not+an+OAuth+client+JSON+"
+                "(expected+a+Desktop-app+client+from+Google+Cloud+Console)",
+                status_code=303,
+            )
+        Path("credentials.json").write_bytes(data)
+        return RedirectResponse(
+            "/setup?msg=credentials+saved+—+now+authorize", status_code=303
+        )
+
+    @app.get("/oauth/start")
+    def oauth_start(request: Request):
+        if not Path("credentials.json").exists():
+            return RedirectResponse(
+                "/setup?err=upload+credentials.json+first", status_code=303
+            )
+        redirect_uri = str(request.url_for("oauth_callback"))
+        flow = oauth_flow_factory(redirect_uri)
+        auth_url, state = flow.authorization_url(
+            access_type="offline", prompt="consent"
+        )
+        app.state.oauth = {"state": state, "redirect_uri": redirect_uri}
+        return RedirectResponse(auth_url, status_code=303)
+
+    @app.get("/oauth/callback", name="oauth_callback")
+    def oauth_callback(
+        request: Request,
+        state: str | None = None,
+        code: str | None = None,
+        error: str | None = None,
+    ):
+        if error:
+            return RedirectResponse(
+                f"/setup?err=authorization+failed:+{html.escape(error)}",
+                status_code=303,
+            )
+        pending = app.state.oauth
+        if not pending or not state or state != pending["state"] or not code:
+            raise HTTPException(status_code=400, detail="OAuth state mismatch")
+        flow = oauth_flow_factory(pending["redirect_uri"])
+        flow.fetch_token(code=code)
+        Path("token.json").write_text(flow.credentials.to_json())
+        app.state.oauth = None
+        app.state.fetcher = None  # rebuild with the fresh credentials
+        return RedirectResponse("/setup?msg=Google+Drive+authorized", status_code=303)
+
+    @app.post("/setup/ollama")
+    async def save_ollama(request: Request):
+        from urllib.parse import quote
+
+        form = await request.form()
+        host = str(form.get("host", "")).strip()
+        model = str(form.get("model", "")).strip()
+        if not host or not model:
+            return RedirectResponse(
+                "/setup?err=host+and+model+are+required", status_code=303
+            )
+        try:
+            models = ollama_lister(host)
+        except Exception as exc:
+            return RedirectResponse(
+                f"/setup?err={quote(f'cannot reach Ollama at {host}: {exc}')}",
+                status_code=303,
+            )
+        if model not in models:
+            return RedirectResponse(
+                f"/setup?err={quote(f'model {model} is not installed on {host}')}",
+                status_code=303,
+            )
+        set_config_value(config_path, "host", host, section="ollama")
+        set_config_value(config_path, "model", model, section="ollama")
+        reload_config()
+        return RedirectResponse(
+            f"/setup?msg={quote(f'Ollama set to {model} at {host}')}",
+            status_code=303,
+        )
+
+    @app.post("/setup/folder")
+    async def save_folder(request: Request):
+        from urllib.parse import quote
+
+        form = await request.form()
+        raw = str(form.get("folder", ""))
+        try:
+            folder_id = parse_folder_input(raw)
+        except ValueError as exc:
+            return RedirectResponse(f"/setup?err={quote(str(exc))}", status_code=303)
+        label = "entire Drive"
+        if folder_id is not None:
+            try:
+                meta = drive_client_factory().get_folder(folder_id)
+            except CredentialsRequired:
+                return RedirectResponse(
+                    "/setup?err=authorize+Google+Drive+first+(step+1)",
+                    status_code=303,
+                )
+            except Exception as exc:
+                return RedirectResponse(
+                    f"/setup?err={quote(f'folder not accessible: {exc}')}",
+                    status_code=303,
+                )
+            label = f"folder “{meta['name']}”"
+        set_config_value(config_path, "drive_folder_id", folder_id or "")
+        reload_config()
+        return RedirectResponse(
+            f"/setup?msg={quote(f'scan scope set to {label}')}", status_code=303
+        )
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         photo_count = conn.execute(
@@ -211,6 +405,8 @@ def create_app(
                 "tier_counts": tier_counts,
                 "trash_count": trash_count,
                 "scans": scan_overview(conn),
+                "needs_setup": not Path("token.json").exists(),
+                "folder_id": config.drive_folder_id,
             },
         )
 

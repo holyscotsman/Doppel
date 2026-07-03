@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Library</h2>
+{% if needs_setup %}
+<div class="banner">
+  Not connected to Google Drive yet — run the <a href="/setup">setup wizard</a>
+  to authorize Drive, pick your local model, and choose what to scan.
+</div>
+{% endif %}
+<h2>Library
+  {% if folder_id %}<span class="muted" style="font-size:0.8rem">scoped to folder {{ folder_id }}</span>{% endif %}
+</h2>
 <div class="cards">
   <div class="card">
     <div class="big">{{ photo_count }}</div>

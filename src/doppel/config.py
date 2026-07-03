@@ -25,6 +25,7 @@ class Config:
     clip_model: str
     db_path: Path
     cache_dir: Path
+    drive_folder_id: str  # "" = scan the entire Drive
     ollama: OllamaConfig
 
 
@@ -42,6 +43,7 @@ def load_config(path: Path | str = "config.toml") -> Config:
         clip_model=raw["clip_model"],
         db_path=Path(raw["db_path"]),
         cache_dir=Path(raw["cache_dir"]),
+        drive_folder_id=raw.get("drive_folder_id", ""),
         ollama=OllamaConfig(
             host=ollama["host"],
             model=ollama["model"],
@@ -49,3 +51,48 @@ def load_config(path: Path | str = "config.toml") -> Config:
             brand_review_max_confidence=ollama["brand_review_max_confidence"],
         ),
     )
+
+
+def set_config_value(
+    path: Path | str, key: str, value: str, section: str | None = None
+) -> None:
+    """Rewrite one `key = "value"` line in config.toml, preserving comments
+    and formatting. The setup wizard's only write path into configuration.
+    """
+    import re
+
+    path = Path(path)
+    lines = path.read_text().splitlines(keepends=True)
+    current_section: str | None = None
+    pattern = re.compile(rf"^{re.escape(key)}\s*=")
+    new_line = f'{key} = "{value}"\n'
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            current_section = stripped.strip("[]")
+        if current_section == section and pattern.match(line):
+            # keep an inline comment if present
+            comment = line.split("#", 1)
+            suffix = f"  #{comment[1]}" if len(comment) > 1 else "\n"
+            lines[i] = f'{key} = "{value}"' + (
+                suffix if suffix.startswith("  #") else "\n"
+            )
+            path.write_text("".join(lines))
+            return
+    # key absent: append it to the right place
+    if section is None:
+        # insert before the first section header, or at the end
+        insert_at = next(
+            (i for i, ln in enumerate(lines) if ln.strip().startswith("[")),
+            len(lines),
+        )
+        lines.insert(insert_at, new_line)
+    else:
+        header = f"[{section}]"
+        try:
+            start = next(i for i, ln in enumerate(lines) if ln.strip() == header)
+        except StopIteration:
+            lines.append(f"\n{header}\n")
+            start = len(lines) - 1
+        lines.insert(start + 1, new_line)
+    path.write_text("".join(lines))

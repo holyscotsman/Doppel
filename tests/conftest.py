@@ -22,6 +22,7 @@ def config(tmp_path) -> Config:
         clip_model="ViT-B-32/laion2b_s34b_b79k",
         db_path=tmp_path / "test.db",
         cache_dir=tmp_path / "cache",
+        drive_folder_id="",
         ollama=OllamaConfig(
             host="http://127.0.0.1:11434",
             model="test-model",

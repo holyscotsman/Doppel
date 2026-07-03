@@ -18,15 +18,82 @@ LIST_FIELDS = (
     "nextPageToken, files(id, name, mimeType, size, md5Checksum, "
     "imageMediaMetadata(width, height), createdTime, modifiedTime, thumbnailLink)"
 )
+FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000
+
+# how many parent-folder clauses to OR into one files.list query
+PARENT_QUERY_CHUNK = 20
+
+_FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 
 
 class DriveClient(Protocol):
     """The subset of the Drive API the sync job needs. Tests use a fake."""
 
-    def list_images_page(self, page_token: str | None = None) -> dict[str, Any]:
-        """One page of files.list: {'files': [...], 'nextPageToken': str | absent}."""
+    def list_images_page(
+        self,
+        page_token: str | None = None,
+        parent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """One page of files.list: {'files': [...], 'nextPageToken': str | absent}.
+
+        parent_ids restricts results to direct children of those folders.
+        """
         ...
+
+    def list_folders_page(
+        self, parent_id: str, page_token: str | None = None
+    ) -> dict[str, Any]:
+        """One page of subfolders directly under parent_id."""
+        ...
+
+
+def parse_folder_input(text: str) -> str | None:
+    """Extract a Drive folder id from a pasted URL or raw id; None if the
+    input is empty (= whole Drive) — raises ValueError if unparseable."""
+    text = text.strip()
+    if not text:
+        return None
+    match = re.search(r"folders/([A-Za-z0-9_-]+)", text)
+    if match:
+        return match.group(1)
+    if _FOLDER_ID_RE.match(text):
+        return text
+    raise ValueError(
+        "could not parse a folder id — paste the folder URL from Drive "
+        "(…/drive/folders/<id>) or the id itself"
+    )
+
+
+def collect_folder_tree(client: DriveClient, root_id: str) -> list[str]:
+    """The root folder id plus every descendant folder id (BFS). Drive has
+    no recursive query, so the tree is walked one level at a time."""
+    seen = {root_id}
+    queue = [root_id]
+    while queue:
+        parent = queue.pop(0)
+        page_token: str | None = None
+        while True:
+            page = client.list_folders_page(parent, page_token)
+            for folder in page.get("files", []):
+                if folder["id"] not in seen:
+                    seen.add(folder["id"])
+                    queue.append(folder["id"])
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+    return sorted(seen)
+
+
+def web_auth_flow(credentials_path: Path | str, redirect_uri: str) -> Any:
+    """OAuth flow for the setup wizard: the consent redirect comes back to
+    our own /oauth/callback route instead of a throwaway local server.
+    Desktop-app OAuth clients accept any loopback redirect."""
+    from google_auth_oauthlib.flow import Flow
+
+    return Flow.from_client_secrets_file(
+        str(credentials_path), scopes=SCOPES, redirect_uri=redirect_uri
+    )
 
 
 class CredentialsRequired(RuntimeError):
@@ -91,17 +158,62 @@ class GoogleDriveClient:
 
         self._service = build("drive", "v3", credentials=credentials)
 
-    def list_images_page(self, page_token: str | None = None) -> dict[str, Any]:
+    def list_images_page(
+        self,
+        page_token: str | None = None,
+        parent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        query = LIST_QUERY
+        if parent_ids:
+            parents = " or ".join(
+                f"'{self._sanitize_id(fid)}' in parents" for fid in parent_ids
+            )
+            query = f"({parents}) and {LIST_QUERY}"
         return (
             self._service.files()
             .list(
-                q=LIST_QUERY,
+                q=query,
                 pageSize=PAGE_SIZE,
                 fields=LIST_FIELDS,
                 pageToken=page_token,
             )
             .execute()
         )
+
+    def list_folders_page(
+        self, parent_id: str, page_token: str | None = None
+    ) -> dict[str, Any]:
+        query = (
+            f"'{self._sanitize_id(parent_id)}' in parents "
+            f"and mimeType = '{FOLDER_MIME}' and trashed = false"
+        )
+        return (
+            self._service.files()
+            .list(
+                q=query,
+                pageSize=PAGE_SIZE,
+                fields="nextPageToken, files(id, name)",
+                pageToken=page_token,
+            )
+            .execute()
+        )
+
+    def get_folder(self, folder_id: str) -> dict[str, Any]:
+        """Folder metadata; raises if the id is not a reachable folder."""
+        meta = (
+            self._service.files()
+            .get(fileId=folder_id, fields="id, name, mimeType")
+            .execute()
+        )
+        if meta.get("mimeType") != FOLDER_MIME:
+            raise ValueError(f"{meta.get('name', folder_id)!r} is not a folder")
+        return meta
+
+    @staticmethod
+    def _sanitize_id(drive_id: str) -> str:
+        if not _FOLDER_ID_RE.match(drive_id):
+            raise ValueError(f"invalid Drive id {drive_id!r}")
+        return drive_id
 
     def get_thumbnail_link(self, drive_id: str) -> str | None:
         meta = (

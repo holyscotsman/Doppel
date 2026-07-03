@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from doppel.drive import DriveClient
+from doppel.drive import PARENT_QUERY_CHUNK, DriveClient, collect_folder_tree
 
 
 def now() -> str:
@@ -130,39 +130,59 @@ def run_sync(
     conn: sqlite3.Connection,
     client: DriveClient,
     cache_dir: Path | str | None = None,
+    folder_id: str | None = None,
 ) -> int:
     """Full inventory sync: upsert every Drive image, mark unseen rows missing.
 
     Returns the scans row id. Idempotent: a re-run with an unchanged Drive
     account changes nothing. When a file's content changed in place (same
     drive_id, different md5), its derived state is invalidated.
+
+    folder_id scopes the scan to that folder's subtree (walked recursively —
+    Drive has no recursive query). Photos synced earlier but outside the
+    scope are marked 'missing': out of scope means out of the review set.
     """
     scan_id = start_scan(conn, "sync")
     try:
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen (drive_id TEXT PRIMARY KEY)")
         conn.execute("DELETE FROM seen")
+
+        # each batch is one files.list query: the whole Drive, or a chunk of
+        # parent-folder clauses from the scoped subtree
+        if folder_id:
+            folder_ids = collect_folder_tree(client, folder_id)
+            batches: list[list[str] | None] = [
+                folder_ids[i : i + PARENT_QUERY_CHUNK]
+                for i in range(0, len(folder_ids), PARENT_QUERY_CHUNK)
+            ]
+        else:
+            batches = [None]
+
         processed = 0
-        page_token: str | None = None
-        while True:
-            page = client.list_images_page(page_token)
-            for file in page.get("files", []):
-                old = conn.execute(
-                    "SELECT md5 FROM photos WHERE drive_id = ?", (file["id"],)
-                ).fetchone()
-                _upsert_photo(conn, file)
-                if old is not None and old["md5"] != file.get("md5Checksum"):
-                    _invalidate_derived(conn, file["id"], cache_dir)
+        for parent_ids in batches:
+            page_token: str | None = None
+            while True:
+                page = client.list_images_page(page_token, parent_ids=parent_ids)
+                for file in page.get("files", []):
+                    old = conn.execute(
+                        "SELECT md5 FROM photos WHERE drive_id = ?", (file["id"],)
+                    ).fetchone()
+                    _upsert_photo(conn, file)
+                    if old is not None and old["md5"] != file.get("md5Checksum"):
+                        _invalidate_derived(conn, file["id"], cache_dir)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO seen (drive_id) VALUES (?)",
+                        (file["id"],),
+                    )
+                    processed += 1
                 conn.execute(
-                    "INSERT OR IGNORE INTO seen (drive_id) VALUES (?)", (file["id"],)
+                    "UPDATE scans SET processed = ? WHERE id = ?",
+                    (processed, scan_id),
                 )
-                processed += 1
-            conn.execute(
-                "UPDATE scans SET processed = ? WHERE id = ?", (processed, scan_id)
-            )
-            conn.commit()
-            page_token = page.get("nextPageToken")
-            if not page_token:
-                break
+                conn.commit()
+                page_token = page.get("nextPageToken")
+                if not page_token:
+                    break
         conn.execute(
             "UPDATE photos SET status = 'missing' "
             "WHERE drive_id NOT IN (SELECT drive_id FROM seen)"

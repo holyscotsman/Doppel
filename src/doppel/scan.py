@@ -19,7 +19,7 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     client = GoogleDriveClient(creds)
-    scan_id = run_sync(conn, client, config.cache_dir)
+    scan_id = run_sync(conn, client, config.cache_dir, config.drive_folder_id or None)
     row = conn.execute(
         "SELECT processed FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()

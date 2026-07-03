@@ -14,6 +14,7 @@ def make_file(
     width: int | None = 800,
     height: int | None = 600,
     thumbnail_link: str | None = None,
+    parent: str | None = None,
 ) -> dict[str, Any]:
     """Build a Drive files.list item as the API returns it (size is a string)."""
     file: dict[str, Any] = {
@@ -31,19 +32,35 @@ def make_file(
         file["imageMediaMetadata"] = {"width": width, "height": height}
     if thumbnail_link is not None:
         file["thumbnailLink"] = thumbnail_link
+    if parent is not None:
+        file["parents"] = [parent]
     return file
 
 
 class FakeDriveClient:
-    """Serves canned files in pages, mimicking files.list pagination."""
+    """Serves canned files in pages, mimicking files.list pagination.
 
-    def __init__(self, files: list[dict[str, Any]], page_size: int = 2) -> None:
+    `folders` maps folder_id -> parent folder id, mimicking a Drive folder
+    tree for scoped scans.
+    """
+
+    def __init__(
+        self,
+        files: list[dict[str, Any]],
+        page_size: int = 2,
+        folders: dict[str, str] | None = None,
+    ) -> None:
         self.files = files
         self.page_size = page_size
+        self.folders = folders or {}
         self.pages_served: list[str | None] = []
         self.fail_after_pages: int | None = None
 
-    def list_images_page(self, page_token: str | None = None) -> dict[str, Any]:
+    def list_images_page(
+        self,
+        page_token: str | None = None,
+        parent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         failing = (
             self.fail_after_pages is not None
             and len(self.pages_served) >= self.fail_after_pages
@@ -51,12 +68,27 @@ class FakeDriveClient:
         if failing:
             raise RuntimeError("simulated Drive API failure")
         self.pages_served.append(page_token)
+        if parent_ids is None:
+            matching = self.files
+        else:
+            wanted = set(parent_ids)
+            matching = [f for f in self.files if wanted & set(f.get("parents", []))]
         start = int(page_token) if page_token else 0
         end = start + self.page_size
-        page: dict[str, Any] = {"files": self.files[start:end]}
-        if end < len(self.files):
+        page: dict[str, Any] = {"files": matching[start:end]}
+        if end < len(matching):
             page["nextPageToken"] = str(end)
         return page
+
+    def list_folders_page(
+        self, parent_id: str, page_token: str | None = None
+    ) -> dict[str, Any]:
+        children = [
+            {"id": fid, "name": fid}
+            for fid, parent in sorted(self.folders.items())
+            if parent == parent_id
+        ]
+        return {"files": children}
 
 
 class FakeResponse:
