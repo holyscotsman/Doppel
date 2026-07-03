@@ -68,14 +68,22 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
     )
 
 
-def _list_ollama_models(host: str) -> list[str]:
-    """Model names installed on an Ollama server. Raises on unreachable.
+# vision models that take one image per request and can't compare a pair, so
+# they're useless for the adjudication stage — matched as substrings of the
+# model name (before the tag). Every installed model reports the "vision"
+# capability, so this denylist is what actually separates usable from not.
+INCOMPATIBLE_VISION_MODELS = (
+    "minicpm",
+    "llava",
+    "bakllava",
+    "moondream",
+    "llama3.2-vision",
+    "llama-vision",
+)
 
-    A short timeout keeps /setup from hanging when the configured host is
-    down or unreachable (ollama's client defaults to no timeout)."""
-    import ollama
 
-    response = ollama.Client(host=host, timeout=5).list()
+def _installed_model_names(client: object) -> list[str]:
+    response = client.list()
     models = getattr(response, "models", None) or response.get("models", [])
     names = []
     for m in models:
@@ -83,6 +91,34 @@ def _list_ollama_models(host: str) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+def _usable_models(client: object) -> list[str]:
+    """Filter an Ollama client's installed models to those usable for
+    multi-image adjudication: vision-capable and not a known single-image
+    family."""
+    usable = []
+    for name in _installed_model_names(client):
+        base = name.split(":", 1)[0].lower()
+        if any(bad in base for bad in INCOMPATIBLE_VISION_MODELS):
+            continue
+        try:
+            caps = getattr(client.show(name), "capabilities", None) or []
+        except Exception:
+            continue  # model metadata unavailable — skip rather than guess
+        if "vision" in caps:
+            usable.append(name)
+    return usable
+
+
+def _list_ollama_models(host: str) -> list[str]:
+    """Usable models on an Ollama server. Raises if the host is unreachable.
+
+    A short timeout keeps /setup from hanging when the host is down (ollama's
+    client defaults to no timeout)."""
+    import ollama
+
+    return _usable_models(ollama.Client(host=host, timeout=5))
 
 
 def create_app(
@@ -259,12 +295,25 @@ def create_app(
         ollama_host: str | None = None,
     ):
         host = ollama_host or config.ollama.host
+        tested = ollama_host is not None  # arrived via the "test connection" form
         models: list[str] | None = None
-        ollama_error = None
+        ollama_status: dict | None = None
         try:
             models = ollama_lister(host)
+            if models:
+                ollama_status = {
+                    "ok": True,
+                    "message": f"Test successful — {len(models)} usable "
+                    f"model{'s' if len(models) != 1 else ''} found.",
+                }
+            else:
+                ollama_status = {
+                    "ok": False,
+                    "message": "Connected, but no multi-image vision models are "
+                    "installed. Pull one, e.g. `ollama pull gemma3`.",
+                }
         except Exception as exc:
-            ollama_error = f"cannot reach Ollama at {host}: {exc}"
+            ollama_status = {"ok": False, "message": f"Test failed: {exc}"}
         return templates.TemplateResponse(
             request,
             "setup.html",
@@ -277,8 +326,40 @@ def create_app(
                 "saved_host": config.ollama.host,
                 "saved_model": config.ollama.model,
                 "models": models,
-                "ollama_error": ollama_error,
+                "ollama_status": ollama_status,
+                "tested": tested,
                 "folder_id": config.drive_folder_id,
+            },
+        )
+
+    @app.get("/drive/browse", response_class=HTMLResponse)
+    def drive_browse(request: Request, folder: str = "root"):
+        """Folder-picker partial: subfolders of `folder`, with breadcrumb and
+        a scan-this-folder button. Drives the setup wizard's scope step."""
+        try:
+            client = drive_client_factory()
+        except CredentialsRequired:
+            return HTMLResponse(
+                '<p class="muted">Connect Google Drive first (step 1).</p>'
+            )
+        try:
+            meta = client.get_folder(folder)
+            subfolders = client.list_child_folders(folder)
+        except Exception as exc:
+            return HTMLResponse(
+                f'<p class="error">could not read that folder: '
+                f"{html.escape(str(exc))}</p>"
+            )
+        parents = meta.get("parents") or []
+        return templates.TemplateResponse(
+            request,
+            "drive_browse.html",
+            {
+                "current": meta,
+                "parent": parents[0] if parents else None,
+                "is_root": not parents,  # My Drive has no parent
+                "subfolders": sorted(subfolders, key=lambda f: f["name"].lower()),
+                "saved_folder": config.drive_folder_id,
             },
         )
 

@@ -1,0 +1,37 @@
+<div class="browser">
+  <div class="crumbs">
+    {% if is_root %}
+      <strong>🏠 My Drive</strong>
+    {% else %}
+      <a class="crumb" hx-get="/drive/browse?folder=root" hx-target="#drive-browser">🏠 My Drive</a>
+      {% if parent %}
+      <span class="sep">/</span>
+      <a class="crumb" hx-get="/drive/browse?folder={{ parent }}" hx-target="#drive-browser">⬆ up</a>
+      {% endif %}
+      <span class="sep">/</span>
+      <strong>{{ current.name }}</strong>
+    {% endif %}
+  </div>
+
+  <form method="post" action="/setup/folder" class="decision scan-here">
+    <input type="hidden" name="folder" value="{{ '' if is_root else current.id }}">
+    <button type="submit">
+      {% if is_root %}Scan entire Drive{% else %}Scan “{{ current.name }}”{% endif %}
+    </button>
+    {% if (is_root and not saved_folder) or (not is_root and saved_folder == current.id) %}
+    <span class="badge badge-ok">current scope</span>
+    {% endif %}
+  </form>
+
+  <ul class="folders">
+    {% for f in subfolders %}
+    <li>
+      <a class="folder" hx-get="/drive/browse?folder={{ f.id }}" hx-target="#drive-browser">
+        📁 {{ f.name }}
+      </a>
+    </li>
+    {% else %}
+    <li class="muted">no subfolders here</li>
+    {% endfor %}
+  </ul>
+</div>

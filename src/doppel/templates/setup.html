@@ -8,43 +8,48 @@
 <div class="setup-step">
   <h3>1. Google Drive
     {% if authorized %}<span class="badge badge-ok">connected</span>
-    {% elif credentials_present %}<span class="badge">credentials uploaded — authorize below</span>
+    {% elif credentials_present %}<span class="badge">ready — sign in below</span>
     {% else %}<span class="badge badge-todo">not connected</span>{% endif %}
   </h3>
-  {% if not credentials_present %}
-  <p class="muted">
-    Create an <strong>OAuth client ID</strong> of type <strong>Desktop app</strong> in
-    <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a>
-    (enable the Google Drive API first), download the JSON, and upload it here.
-    It never leaves this machine and only read-only Drive access is requested.
-  </p>
-  {% endif %}
-  <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
-    <input type="file" name="credentials" accept=".json,application/json" required>
-    <button type="submit">upload credentials.json</button>
-  </form>
   {% if credentials_present %}
-  <form method="post" action="/oauth/start">
-    <button type="submit">
-      {% if authorized %}re-authorize with Google{% else %}authorize with Google{% endif %}
-    </button>
-  </form>
+    <form method="post" action="/oauth/start">
+      <button type="submit" class="google-btn">
+        {% if authorized %}Re-connect Google Drive{% else %}Sign in with Google{% endif %}
+      </button>
+    </form>
+    {% if authorized %}
+    <p class="muted">Read-only access. doppel never changes anything in your Drive.</p>
+    {% endif %}
+  {% else %}
+    <p class="muted">
+      One-time setup: doppel needs a Google “OAuth client” so it can ask for your
+      permission. Create a free one (type <strong>Desktop app</strong>) in the
+      <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google&nbsp;Cloud&nbsp;Console</a>
+      with the Drive API enabled, download the JSON, and drop it in below. After
+      this once, connecting is a single “Sign in with Google” click — for good.
+    </p>
+    <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
+      <input type="file" name="credentials" accept=".json,application/json" required>
+      <button type="submit">use this client file</button>
+    </form>
   {% endif %}
 </div>
 
 <div class="setup-step">
   <h3>2. Local LLM (Ollama)
-    {% if models and saved_model in models %}<span class="badge badge-ok">{{ saved_model }}</span>
-    {% elif ollama_error %}<span class="badge badge-todo">unreachable</span>{% endif %}
+    {% if models and saved_model in models %}<span class="badge badge-ok">{{ saved_model }}</span>{% endif %}
   </h3>
   <form method="get" action="/setup" class="decision">
     <input type="text" name="ollama_host" value="{{ host }}" size="30">
     <button type="submit">test connection</button>
   </form>
-  {% if ollama_error %}
-  <p class="error">{{ ollama_error }}</p>
-  <p class="muted">Is Ollama running? Start it and press “test connection”.</p>
-  {% elif models is not none %}
+  {% if tested and ollama_status %}
+    <p class="{{ 'ok' if ollama_status.ok else 'error' }}">
+      {{ '✓' if ollama_status.ok else '✕' }} {{ ollama_status.message }}
+    </p>
+  {% elif ollama_status and not ollama_status.ok %}
+    <p class="muted">{{ ollama_status.message }}</p>
+  {% endif %}
   {% if models %}
   <form method="post" action="/setup/ollama" class="decision">
     <input type="hidden" name="host" value="{{ host }}">
@@ -55,11 +60,8 @@
     </select>
     <button type="submit">save model</button>
   </form>
-  <p class="muted">Pick a vision model that accepts multiple images per prompt
-    (e.g. gemma3, qwen3-vl). Plain text models will fail at the adjudicate/brand stages.</p>
-  {% else %}
-  <p class="error">Ollama is reachable but has no models — run <code>ollama pull gemma3</code> first.</p>
-  {% endif %}
+  <p class="muted">Only models that can compare a pair of images are listed —
+    that’s what the duplicate-adjudication step needs.</p>
   {% endif %}
 </div>
 
@@ -68,14 +70,15 @@
     {% if folder_id %}<span class="badge badge-ok">folder {{ folder_id }}</span>
     {% else %}<span class="badge badge-ok">entire Drive</span>{% endif %}
   </h3>
-  <p class="muted">Paste a Drive folder link (…/drive/folders/&lt;id&gt;) to scan only
-    that folder and its subfolders, or leave empty to scan every image in Drive.
-    Requires step 1 first so the folder can be verified.</p>
-  <form method="post" action="/setup/folder" class="decision">
-    <input type="text" name="folder" value="{{ folder_id }}" size="50"
-           placeholder="https://drive.google.com/drive/folders/…  (empty = whole Drive)">
-    <button type="submit">save scope</button>
-  </form>
+  {% if authorized %}
+  <p class="muted">Browse your Drive and pick a folder to scan (its subfolders are
+    included), or scan everything from My&nbsp;Drive.</p>
+  <div id="drive-browser" hx-get="/drive/browse?folder=root" hx-trigger="load">
+    <p class="muted">loading your Drive…</p>
+  </div>
+  {% else %}
+  <p class="muted">Connect Google Drive first (step 1) to browse your folders.</p>
+  {% endif %}
 </div>
 
 <p><a href="/">&larr; back to dashboard</a></p>

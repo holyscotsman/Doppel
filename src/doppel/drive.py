@@ -204,21 +204,39 @@ class GoogleDriveClient:
         )
 
     def get_folder(self, folder_id: str) -> dict[str, Any]:
-        """Folder metadata; raises if the id is not a reachable folder."""
+        """Folder metadata (incl. parents for up-navigation); raises if the
+        id is not a reachable folder. 'root' resolves to My Drive."""
         meta = (
             self._service.files()
-            .get(fileId=folder_id, fields="id, name, mimeType", supportsAllDrives=True)
+            .get(
+                fileId=folder_id,
+                fields="id, name, mimeType, parents",
+                supportsAllDrives=True,
+            )
             .execute()
         )
         if meta.get("mimeType") != FOLDER_MIME:
             raise ValueError(f"{meta.get('name', folder_id)!r} is not a folder")
         return meta
 
+    def list_child_folders(self, parent_id: str) -> list[dict[str, Any]]:
+        """Every subfolder directly under parent_id (paginated to completion)."""
+        folders: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            page = self.list_folders_page(parent_id, page_token)
+            folders.extend(page.get("files", []))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+        return folders
+
     @staticmethod
     def _sanitize_id(drive_id: str) -> str:
-        if not _FOLDER_ID_RE.match(drive_id):
-            raise ValueError(f"invalid Drive id {drive_id!r}")
-        return drive_id
+        # 'root' is Drive's alias for My Drive's top folder
+        if drive_id == "root" or _FOLDER_ID_RE.match(drive_id):
+            return drive_id
+        raise ValueError(f"invalid Drive id {drive_id!r}")
 
     def get_thumbnail_link(self, drive_id: str) -> str | None:
         meta = (

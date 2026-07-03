@@ -60,14 +60,36 @@ class FakeFlow:
         self.fetched.append(code)
 
 
-class FakeFolderClient:
-    def __init__(self, folders: dict[str, str]) -> None:
-        self.folders = folders  # id -> name
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# a small Drive folder tree for the browser: id -> (name, parent, [child ids])
+BROWSE_TREE = {
+    "root": ("My Drive", None, ["photos_folder", "docs_folder"]),
+    "photos_folder": ("Photos", "root", ["y2024_folder"]),
+    "y2024_folder": ("2024", "photos_folder", []),
+    "docs_folder": ("Docs", "root", []),
+    "folderid1234": ("Trip", "root", []),  # used by the save-scope tests
+}
+
+
+class FakeBrowseClient:
+    """Fake Drive client supporting folder navigation for the picker."""
+
+    def __init__(self, tree: dict) -> None:
+        self.tree = tree
 
     def get_folder(self, folder_id: str) -> dict:
-        if folder_id not in self.folders:
+        if folder_id not in self.tree:
             raise RuntimeError("404 folder not found")
-        return {"id": folder_id, "name": self.folders[folder_id]}
+        name, parent, _ = self.tree[folder_id]
+        meta = {"id": folder_id, "name": name, "mimeType": FOLDER_MIME}
+        if parent is not None:
+            meta["parents"] = [parent]
+        return meta
+
+    def list_child_folders(self, folder_id: str) -> list[dict]:
+        _, _, children = self.tree[folder_id]
+        return [{"id": c, "name": self.tree[c][0]} for c in children]
 
 
 @pytest.fixture
@@ -88,7 +110,7 @@ def wizard(tmp_path, monkeypatch):
             if "11434" in host
             else (_ for _ in ()).throw(ConnectionError("refused"))
         ),
-        drive_client_factory=lambda: FakeFolderClient({"folderid1234": "Photos"}),
+        drive_client_factory=lambda: FakeBrowseClient(BROWSE_TREE),
     )
     with TestClient(app) as client:
         client.app = app
@@ -414,3 +436,149 @@ def test_ollama_model_with_quote_does_not_brick_config(wizard) -> None:
     # the config still loads
     assert resp.status_code == 303
     load_config(wizard.config_file)  # raises if corrupted
+
+
+# --- Ollama: test-connection feedback + usable-model filtering ---
+
+
+class FakeShow:
+    def __init__(self, capabilities):
+        self.capabilities = capabilities
+
+
+class FakeOllamaClient:
+    """Mimics the ollama Client: .list() and .show(name).capabilities."""
+
+    def __init__(self, models):
+        # models: dict name -> capabilities list
+        self._models = models
+
+    def list(self):
+        return {"models": [{"model": n} for n in self._models]}
+
+    def show(self, name):
+        return FakeShow(self._models[name])
+
+
+def test_usable_models_filters_vision_and_denylist():
+    from doppel.app import _usable_models
+
+    client = FakeOllamaClient(
+        {
+            "gemma3:27b": ["completion", "vision"],  # keep
+            "qwen3-vl:latest": ["completion", "vision"],  # keep
+            "minicpm-v:latest": ["completion", "vision"],  # drop (denylist)
+            "llava:13b": ["completion", "vision"],  # drop (denylist)
+            "llama3:8b": ["completion"],  # drop (no vision)
+        }
+    )
+    assert _usable_models(client) == ["gemma3:27b", "qwen3-vl:latest"]
+
+
+def test_test_connection_reports_success(wizard):
+    page = wizard.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
+    assert "Test successful" in page.text
+    assert "2 usable models" in page.text
+    assert "gemma3:27b" in page.text  # dropdown populated
+
+
+def test_test_connection_reports_failure(wizard):
+    page = wizard.get("/setup", params={"ollama_host": "http://127.0.0.1:9999"})
+    assert "Test failed" in page.text
+    assert "gemma3:27b" not in page.text  # no dropdown when unreachable
+
+
+def test_test_connection_reports_no_usable_models(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        ollama_lister=lambda host: [],  # reachable, but nothing usable
+    )
+    with TestClient(app) as client:
+        page = client.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
+        assert "no multi-image vision models" in page.text.lower()
+
+
+# --- Drive folder browser ---
+
+
+def test_setup_shows_browser_only_when_authorized(wizard, tmp_path):
+    # not authorized yet: prompt to connect first
+    page = wizard.get("/setup")
+    assert "Connect Google Drive first" in page.text
+    assert 'hx-get="/drive/browse' not in page.text
+
+    (tmp_path / "token.json").write_text("{}")
+    page = wizard.get("/setup")
+    assert 'hx-get="/drive/browse?folder=root"' in page.text
+
+
+def test_drive_browse_lists_my_drive(wizard):
+    page = wizard.get("/drive/browse", params={"folder": "root"})
+    assert page.status_code == 200
+    assert "My Drive" in page.text
+    assert "Photos" in page.text and "Docs" in page.text  # top-level folders
+    assert "Scan entire Drive" in page.text
+
+
+def test_drive_browse_drills_in_with_breadcrumb(wizard):
+    page = wizard.get("/drive/browse", params={"folder": "photos_folder"})
+    assert "Photos" in page.text
+    assert "2024" in page.text  # subfolder shown
+    assert "up" in page.text  # up-nav present
+    assert "Scan “Photos”" in page.text
+    assert 'hx-get="/drive/browse?folder=y2024_folder"' in page.text
+
+
+def test_drive_browse_requires_auth():
+    from doppel.drive import CredentialsRequired
+
+    def needs_auth():
+        raise CredentialsRequired("authorize first")
+
+    app = create_app(
+        config=None,
+        config_path="config.toml",  # real config only for defaults; not written
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=needs_auth,
+    )
+    with TestClient(app) as client:
+        page = client.get("/drive/browse", params={"folder": "root"})
+        assert "Connect Google Drive first" in page.text
+
+
+def test_browser_select_saves_folder_scope(wizard):
+    resp = wizard.post(
+        "/setup/folder", data={"folder": "folderid1234"}, follow_redirects=False
+    )
+    assert resp.status_code == 303
+    assert "msg=" in resp.headers["location"]
+    assert wizard.app.state.config.drive_folder_id == "folderid1234"
+
+
+def test_browser_scan_entire_drive_clears_scope(wizard):
+    wizard.post("/setup/folder", data={"folder": "folderid1234"})
+    resp = wizard.post("/setup/folder", data={"folder": ""}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert wizard.app.state.config.drive_folder_id == ""
+
+
+# --- Drive auth simplification ---
+
+
+def test_signin_button_shown_when_client_present(wizard, tmp_path):
+    (tmp_path / "credentials.json").write_text(VALID_CLIENT_JSON)
+    page = wizard.get("/setup")
+    assert 'action="/oauth/start"' in page.text  # the sign-in button
+    assert 'action="/setup/credentials"' not in page.text  # upload hidden
+
+
+def test_upload_shown_only_before_client_present(wizard):
+    page = wizard.get("/setup")  # no credentials.json in this tmp cwd
+    assert 'action="/setup/credentials"' in page.text  # upload form
+    assert 'action="/oauth/start"' not in page.text  # no sign-in until configured
