@@ -58,14 +58,22 @@ def set_config_value(
 ) -> None:
     """Rewrite one `key = "value"` line in config.toml, preserving comments
     and formatting. The setup wizard's only write path into configuration.
+
+    Values are JSON-escaped, which is valid TOML basic-string escaping —
+    quotes, backslashes, and newlines can never corrupt the file or inject
+    additional keys.
     """
+    import json
     import re
 
     path = Path(path)
     lines = path.read_text().splitlines(keepends=True)
     current_section: str | None = None
-    pattern = re.compile(rf"^{re.escape(key)}\s*=")
-    new_line = f'{key} = "{value}"\n'
+    # leading whitespace before a key is valid TOML — match it too, or an
+    # indented existing key would get a duplicate appended
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    quoted = json.dumps(value)
+    new_line = f"{key} = {quoted}\n"
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("["):
@@ -74,12 +82,12 @@ def set_config_value(
             # keep an inline comment if present
             comment = line.split("#", 1)
             suffix = f"  #{comment[1]}" if len(comment) > 1 else "\n"
-            lines[i] = f'{key} = "{value}"' + (
+            lines[i] = f"{key} = {quoted}" + (
                 suffix if suffix.startswith("  #") else "\n"
             )
             path.write_text("".join(lines))
             return
-    # key absent: append it to the right place
+    # key absent: insert it in the right place
     if section is None:
         # insert before the first section header, or at the end
         insert_at = next(

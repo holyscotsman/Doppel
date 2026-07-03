@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from doppel.app import create_app
 from doppel.config import load_config, set_config_value
+from doppel.db import connect
 from doppel.drive import collect_folder_tree, parse_folder_input
 from doppel.jobs import run_sync
 from tests.fakes import FakeDriveClient, FakeImageFetcher, make_file
@@ -134,17 +135,19 @@ def test_credentials_upload_validates_and_saves(wizard, tmp_path) -> None:
 
 def test_oauth_flow_end_to_end(wizard, tmp_path) -> None:
     # without credentials: redirected back with an error
-    start = wizard.get("/oauth/start", follow_redirects=False)
+    start = wizard.post("/oauth/start", follow_redirects=False)
     assert "err=" in start.headers["location"]
 
     (tmp_path / "credentials.json").write_text(VALID_CLIENT_JSON)
-    start = wizard.get("/oauth/start", follow_redirects=False)
+    start = wizard.post("/oauth/start", follow_redirects=False)
     assert start.status_code == 303
     assert start.headers["location"].startswith("https://accounts.google.com/")
 
-    # forged state is rejected
-    bad = wizard.get("/oauth/callback?state=wrong&code=abc")
-    assert bad.status_code == 400
+    # forged/stale state is rejected — redirected back to the wizard
+    bad = wizard.get("/oauth/callback?state=wrong&code=abc", follow_redirects=False)
+    assert bad.status_code == 303
+    assert "/setup?err=" in bad.headers["location"]
+    assert not (tmp_path / "token.json").exists()  # no token written
 
     done = wizard.get(
         "/oauth/callback?state=state-abc&code=auth-code-1", follow_redirects=False
@@ -310,8 +313,104 @@ def test_set_config_value_inserts_missing_key(tmp_path) -> None:
     assert parsed["ollama"]["host"] == "http://a"
 
 
-def test_scoped_sync_reaches_photos_table_via_ui(wizard, tmp_path) -> None:
-    """Config folder scope + config reload are actually used by the sync
-    stage wiring (smoke via config object)."""
-    cfg = load_config(wizard.config_file)
-    assert cfg.drive_folder_id == ""
+def test_scoped_sync_runs_through_the_dashboard_button(tmp_path, monkeypatch) -> None:
+    """The wizard-set folder scope actually reaches run_sync when the sync
+    stage is launched from the UI."""
+    monkeypatch.chdir(tmp_path)
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache").replace(
+            'drive_folder_id = ""', 'drive_folder_id = "root12345678"'
+        )
+    )
+    (tmp_path / "token.json").write_text("{}")  # sync precheck: Drive connected
+    files = [
+        make_file("in-scope", md5="a", parent="root12345678"),
+        make_file("out-scope", md5="b", parent="elsewhere123"),
+    ]
+    fake_drive = FakeDriveClient(files, folders={"other": "elsewhere123"})
+    app = create_app(
+        config_path=config_file,
+        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
+        drive_client_factory=lambda: fake_drive,
+    )
+    with TestClient(app) as client:
+        resp = client.post("/scans/sync")
+        assert resp.status_code == 200
+        app.state.runner.wait(timeout=10)
+
+    conn = connect(tmp_path / "t.db")
+    rows = {r["drive_id"] for r in conn.execute("SELECT drive_id FROM photos")}
+    conn.close()
+    assert rows == {"in-scope"}  # the out-of-scope photo was never synced
+
+
+def test_same_origin_guard_blocks_cross_origin_writes(wizard) -> None:
+    # a browser attaches Origin to cross-origin POSTs; forge one
+    forged = wizard.post(
+        "/setup/folder",
+        data={"folder": ""},
+        headers={"origin": "https://evil.example"},
+        follow_redirects=False,
+    )
+    assert forged.status_code == 403
+
+    # same-origin (Origin matches the test host) is allowed
+    ok = wizard.post(
+        "/setup/folder",
+        data={"folder": ""},
+        headers={"origin": "http://testserver"},
+        follow_redirects=False,
+    )
+    assert ok.status_code == 303
+
+    # no Origin/Referer (curl, the test suite) is allowed through
+    plain = wizard.post("/setup/folder", data={"folder": ""}, follow_redirects=False)
+    assert plain.status_code == 303
+
+
+def test_oauth_start_requires_post(wizard, tmp_path) -> None:
+    (tmp_path / "credentials.json").write_text(VALID_CLIENT_JSON)
+    assert wizard.get("/oauth/start").status_code == 405  # GET no longer routed
+
+
+def test_oauth_callback_lost_state_returns_to_wizard(wizard) -> None:
+    # state lost (server restart / double-start): redirect back, not a 400
+    resp = wizard.get("/oauth/callback?state=stale&code=abc", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/setup?err=" in resp.headers["location"]
+
+
+def test_set_config_value_escapes_quotes(tmp_path) -> None:
+    import tomllib
+
+    path = tmp_path / "config.toml"
+    path.write_text('[ollama]\nmodel = "old"\n')
+    set_config_value(path, "model", 'weird"name\nwith-newline', section="ollama")
+    # file stays valid TOML and round-trips exactly
+    parsed = tomllib.loads(path.read_text())
+    assert parsed["ollama"]["model"] == 'weird"name\nwith-newline'
+
+
+def test_set_config_value_matches_indented_key(tmp_path) -> None:
+    import tomllib
+
+    path = tmp_path / "config.toml"
+    path.write_text('[ollama]\n  model = "old"\n')  # indented, still valid TOML
+    set_config_value(path, "model", "new", section="ollama")
+    parsed = tomllib.loads(path.read_text())
+    assert parsed["ollama"]["model"] == "new"  # replaced, not duplicated
+
+
+def test_ollama_model_with_quote_does_not_brick_config(wizard) -> None:
+    # a malicious/odd host advertising a quote-laden model name must not
+    # corrupt config.toml
+    resp = wizard.post(
+        "/setup/ollama",
+        data={"host": "http://127.0.0.1:11434", "model": 'gemma"3'},
+        follow_redirects=False,
+    )
+    # rejected (not in the fake's model list) OR saved-but-valid; either way
+    # the config still loads
+    assert resp.status_code == 303
+    load_config(wizard.config_file)  # raises if corrupted

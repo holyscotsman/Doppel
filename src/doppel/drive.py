@@ -135,8 +135,8 @@ def get_credentials(
     if not creds or not creds.valid:
         if not allow_interactive:
             raise CredentialsRequired(
-                "Drive authorization required — run `make scan` once in a "
-                "terminal to complete the OAuth consent flow."
+                "Drive authorization required — open the /setup wizard and "
+                "click “authorize with Google”."
             )
         if not credentials_path.exists():
             raise FileNotFoundError(
@@ -176,6 +176,9 @@ class GoogleDriveClient:
                 pageSize=PAGE_SIZE,
                 fields=LIST_FIELDS,
                 pageToken=page_token,
+                # include shared drives so scoping to a shared-drive folder works
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -194,6 +197,8 @@ class GoogleDriveClient:
                 pageSize=PAGE_SIZE,
                 fields="nextPageToken, files(id, name)",
                 pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -202,7 +207,7 @@ class GoogleDriveClient:
         """Folder metadata; raises if the id is not a reachable folder."""
         meta = (
             self._service.files()
-            .get(fileId=folder_id, fields="id, name, mimeType")
+            .get(fileId=folder_id, fields="id, name, mimeType", supportsAllDrives=True)
             .execute()
         )
         if meta.get("mimeType") != FOLDER_MIME:

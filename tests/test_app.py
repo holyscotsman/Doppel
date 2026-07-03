@@ -87,12 +87,12 @@ def test_scan_status_endpoint(client, config) -> None:
 
 
 def test_sync_without_credentials_shows_error(client, monkeypatch, tmp_path) -> None:
-    monkeypatch.chdir(tmp_path)  # no credentials.json / token.json here
+    monkeypatch.chdir(tmp_path)  # no token.json here
 
     resp = client.post("/scans/sync")
 
     assert resp.status_code == 200
-    assert "credentials.json not found" in resp.text
+    assert "not connected" in resp.text
 
 
 def test_unknown_stage_404(client) -> None:
@@ -175,11 +175,11 @@ def test_stage_error_is_delivered_out_of_band(client, monkeypatch, tmp_path) -> 
 
     # error rides an hx-swap-oob div so the 2s poller cannot erase it
     assert 'id="scan-error" hx-swap-oob="true"' in resp.text
-    assert "credentials.json not found" in resp.text
+    assert "not connected" in resp.text
 
     # the polled partial itself never carries the error
     partial = client.get("/partials/scans")
-    assert "credentials.json" not in partial.text
+    assert "not connected" not in partial.text
 
 
 def test_sync_auth_failure_recorded_in_scans_ledger(

@@ -69,10 +69,13 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
 
 
 def _list_ollama_models(host: str) -> list[str]:
-    """Model names installed on an Ollama server. Raises on unreachable."""
+    """Model names installed on an Ollama server. Raises on unreachable.
+
+    A short timeout keeps /setup from hanging when the configured host is
+    down or unreachable (ollama's client defaults to no timeout)."""
     import ollama
 
-    response = ollama.Client(host=host).list()
+    response = ollama.Client(host=host, timeout=5).list()
     models = getattr(response, "models", None) or response.get("models", [])
     names = []
     for m in models:
@@ -117,18 +120,37 @@ def create_app(
 
     def reload_config() -> None:
         """Re-read config.toml after the wizard writes it and drop lazy
-        singletons built from the old settings."""
+        singletons built from the old settings. Holds init_lock so it cannot
+        race a concurrent get_*() that would otherwise re-cache a client
+        built from the pre-reload config."""
         nonlocal config
-        config = load_config(config_path)
-        app.state.config = config
-        app.state.fetcher = None
-        app.state.embedder = None
-        app.state.vlm = None
+        with init_lock:
+            config = load_config(config_path)
+            app.state.config = config
+            app.state.fetcher = None
+            app.state.embedder = None
+            app.state.vlm = None
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     app.mount(
         "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
     )
+
+    @app.middleware("http")
+    async def same_origin_guard(request: Request, call_next):
+        """CSRF defense for a session-less localhost app: reject mutating
+        requests whose Origin/Referer is a different host than ours. A
+        browser always attaches Origin to a cross-origin POST, so a
+        malicious page cannot forge writes; programmatic clients (curl, the
+        test suite) send neither header and are allowed through."""
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            source = request.headers.get("origin") or request.headers.get("referer")
+            if source is not None:
+                from urllib.parse import urlparse
+
+                if urlparse(source).netloc != request.url.netloc:
+                    return Response("cross-origin request refused", status_code=403)
+        return await call_next(request)
 
     # a killed process leaves 'running' scans rows behind; at startup no job
     # can actually be running, so repair the ledger once
@@ -199,8 +221,7 @@ def create_app(
             try:
                 job: Callable[[], object]
                 if stage == "sync":
-                    creds = get_credentials(allow_interactive=False)
-                    client = GoogleDriveClient(creds)
+                    client = drive_client_factory()
                     folder = config.drive_folder_id or None
                     job = lambda: run_sync(  # noqa: E731
                         conn, client, config.cache_dir, folder
@@ -285,8 +306,10 @@ def create_app(
             "/setup?msg=credentials+saved+—+now+authorize", status_code=303
         )
 
-    @app.get("/oauth/start")
+    @app.post("/oauth/start")
     def oauth_start(request: Request):
+        # POST (not GET) so the same-origin guard covers it: a GET is
+        # reachable by top-level navigation, which carries no Origin
         if not Path("credentials.json").exists():
             return RedirectResponse(
                 "/setup?err=upload+credentials.json+first", status_code=303
@@ -311,14 +334,28 @@ def create_app(
                 f"/setup?err=authorization+failed:+{html.escape(error)}",
                 status_code=303,
             )
+        from urllib.parse import quote
+
         pending = app.state.oauth
         if not pending or not state or state != pending["state"] or not code:
-            raise HTTPException(status_code=400, detail="OAuth state mismatch")
+            # state lost (server restarted, double-start, or forgery): send
+            # the user back to the wizard to retry, not a raw 400 dead-end
+            return RedirectResponse(
+                "/setup?err=" + quote("authorization expired — click authorize again"),
+                status_code=303,
+            )
         flow = oauth_flow_factory(pending["redirect_uri"])
-        flow.fetch_token(code=code)
-        Path("token.json").write_text(flow.credentials.to_json())
+        try:
+            flow.fetch_token(code=code)
+            Path("token.json").write_text(flow.credentials.to_json())
+        except Exception as exc:
+            return RedirectResponse(
+                "/setup?err=" + quote(f"token exchange failed: {exc}"),
+                status_code=303,
+            )
         app.state.oauth = None
-        app.state.fetcher = None  # rebuild with the fresh credentials
+        with init_lock:
+            app.state.fetcher = None  # rebuild with the fresh credentials
         return RedirectResponse("/setup?msg=Google+Drive+authorized", status_code=303)
 
     @app.post("/setup/ollama")
@@ -423,13 +460,8 @@ def create_app(
         error = None
         if stage not in UI_STAGES:
             raise HTTPException(status_code=404, detail=f"unknown stage {stage!r}")
-        if stage == "sync" and not (
-            Path("token.json").exists() or Path("credentials.json").exists()
-        ):
-            error = (
-                "credentials.json not found — create an OAuth client "
-                "(Desktop app) and place it at the repo root."
-            )
+        if stage == "sync" and not Path("token.json").exists():
+            error = "Google Drive is not connected yet — open the setup wizard."
         elif not app.state.runner.start(stage, lambda: run_stage_job(stage)):
             error = "a job is already running"
         # the error goes into #scan-error via an out-of-band swap: the polled
@@ -736,7 +768,7 @@ def create_app(
             """
             SELECT p.drive_id, p.name, p.size, p.md5 FROM decisions d
             JOIN photos p ON p.id = d.photo_id
-            WHERE d.action = 'trash' ORDER BY p.name
+            WHERE d.action = 'trash' AND p.status = 'active' ORDER BY p.name
             """
         ):
             writer.writerow(

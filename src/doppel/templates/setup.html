@@ -24,9 +24,11 @@
     <button type="submit">upload credentials.json</button>
   </form>
   {% if credentials_present %}
-  <p><a href="/oauth/start"><button type="button">
-    {% if authorized %}re-authorize with Google{% else %}authorize with Google{% endif %}
-  </button></a></p>
+  <form method="post" action="/oauth/start">
+    <button type="submit">
+      {% if authorized %}re-authorize with Google{% else %}authorize with Google{% endif %}
+    </button>
+  </form>
   {% endif %}
 </div>
 
