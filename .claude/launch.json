@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "doppel",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["--factory", "doppel.app:build", "--host", "127.0.0.1", "--port", "8056"],
+      "port": 8056,
+      "autoPort": false
+    }
+  ]
+}

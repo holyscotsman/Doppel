@@ -15,11 +15,15 @@
 
   {% if auth_mode == 'service_account' %}
     <div class="note">
-      <strong>One step left — share your photos with doppel.</strong>
-      In Google Drive, right-click the folder you want to scan → <strong>Share</strong>,
-      and add this address as a Viewer:
-      <div style="margin:0.5rem 0"><code>{{ sa_email }}</code></div>
-      Then pick that folder in step 3 below. No sign-in, nothing expires.
+      <strong>✅ Connected! One easy step left — let the robot see your photos.</strong>
+      <ol style="margin:0.6rem 0 0; padding-left:1.2rem; font-size:0.9rem">
+        <li>Open <a href="https://drive.google.com/drive/my-drive" target="_blank" rel="noopener">Google&nbsp;Drive</a>
+          and find the folder with your photos.</li>
+        <li>Right-click it → <b>Share</b> → <b>Share</b>.</li>
+        <li>Paste this address in the box, leave it as <b>Viewer</b>, and click <b>Send</b>:
+          <div style="margin:0.4rem 0"><code>{{ sa_email }}</code></div></li>
+        <li>Come back here — it’ll appear in <b>step 3</b> below to scan.</li>
+      </ol>
     </div>
     <p class="decision" style="gap:1rem; align-items:center">
       <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision" style="margin:0">
@@ -45,19 +49,46 @@
       <button type="submit" class="google-btn">Sign in with Google</button>
     </form>
   {% else %}
-    <p class="muted"><strong>Recommended — service account</strong> (no sign-in flow,
-      no consent screen, never expires). In the
-      <a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Cloud&nbsp;Console</a>:
-      make a service account, add a <strong>JSON key</strong>, enable the Drive API,
-      and drop the key file in below. Then you just share your photos folder with the
-      account’s email — that’s it, for good.</p>
-    <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
-      <input type="file" name="credentials" accept=".json,application/json" required>
-      <button type="submit">connect with key file</button>
-    </form>
-    <p class="muted" style="margin-top:0.8rem">Prefer classic sign-in? This same box
-      also accepts a Desktop <strong>OAuth client</strong> JSON — you’ll then get a
-      “Sign in with Google” button (re-consent every 7 days in test mode).</p>
+    <p class="muted">A one-time setup, about 2 minutes. Do these in order — each
+      <span class="pillnum">1</span>–<span class="pillnum">5</span> button opens the exact
+      Google page in a new tab. Keep this window open; come back here for the last step.</p>
+    <ol class="wizard">
+      <li>
+        <div class="wz-head">Make a Google project</div>
+        <p class="wz-body">On the page that opens, type any name (like <code>doppel</code>)
+          and click the blue <b>Create</b> button. Wait a few seconds until it says it’s ready.</p>
+        <a class="wz-link" href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Open step 1 &rarr;</a>
+      </li>
+      <li>
+        <div class="wz-head">Switch on Google Drive</div>
+        <p class="wz-body">First, at the very top of the page, click the project dropdown and pick
+          the <b>doppel</b> project you just made. Then click the big blue <b>Enable</b> button.</p>
+        <a class="wz-link" href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Open step 2 &rarr;</a>
+      </li>
+      <li>
+        <div class="wz-head">Create the “robot” account</div>
+        <p class="wz-body">Type a name (like <code>doppel</code>), click <b>Create and continue</b>,
+          then click <b>Done</b> — skip the two optional boxes in between.</p>
+        <a class="wz-link" href="https://console.cloud.google.com/iam-admin/serviceaccounts/create" target="_blank" rel="noopener">Open step 3 &rarr;</a>
+      </li>
+      <li>
+        <div class="wz-head">Download the key file</div>
+        <p class="wz-body">Click the robot account you just made, open the <b>Keys</b> tab, then
+          <b>Add key</b> &rarr; <b>Create new key</b> &rarr; choose <b>JSON</b> &rarr; <b>Create</b>.
+          A small <code>.json</code> file lands in your Downloads folder.</p>
+        <a class="wz-link" href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Open step 4 &rarr;</a>
+      </li>
+      <li>
+        <div class="wz-head">Upload that file right here</div>
+        <p class="wz-body">Choose the <code>.json</code> file that just downloaded, then click connect.</p>
+        <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
+          <input type="file" name="credentials" accept=".json,application/json" required>
+          <button type="submit">Upload &amp; connect</button>
+        </form>
+      </li>
+    </ol>
+    <p class="muted">After uploading, we’ll show you a robot email address and one final,
+      easy step: share your photos folder with it in Google Drive.</p>
   {% endif %}
 </div>
 
