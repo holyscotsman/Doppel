@@ -1,0 +1,17 @@
+# credentials and tokens — never commit
+credentials.json
+token.json
+
+# local data
+cache/
+*.db
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# os
+.DS_Store
