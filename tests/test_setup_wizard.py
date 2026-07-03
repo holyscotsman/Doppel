@@ -865,3 +865,35 @@ def test_disconnect_removes_active_credential(wizard, tmp_path):
     wizard.post("/setup/disconnect")
     assert not (tmp_path / "token.json").exists()
     assert auth_mode() is None
+
+
+def test_folder_rows_have_scan_button(wizard):
+    """Every folder — including a shared parent — is scannable directly,
+    not just drillable-into."""
+    page = wizard.get("/drive/browse", params={"folder": "root", "home": "root"})
+    assert "scan this" in page.text
+    assert 'value="photos_folder"' in page.text  # scan-this posts the folder id
+    assert 'value="docs_folder"' in page.text
+
+
+def test_shared_parent_folder_is_directly_scannable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: FakeBrowseClient(
+            BROWSE_TREE, shared=["photos_folder"]
+        ),
+    )
+    with TestClient(app) as client:
+        page = client.get(
+            "/drive/browse", params={"folder": "shared", "home": "shared"}
+        )
+        # the shared parent folder can be scanned straight from the list
+        assert "scan this" in page.text
+        assert 'value="photos_folder"' in page.text

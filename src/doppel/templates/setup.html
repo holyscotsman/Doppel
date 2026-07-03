@@ -150,13 +150,17 @@
     {% else %}<span class="badge badge-ok">entire Drive</span>{% endif %}
   </h3>
   {% if authorized %}
-  <p class="muted">Browse and pick a folder to scan (subfolders included){% if auth_mode == 'oauth' %},
-    or scan everything from My&nbsp;Drive{% endif %}.</p>
+  <p class="muted">Pick what to scan — click <b>scan this</b> on any folder (everything
+    inside it is included){% if auth_mode == 'oauth' %}, or scan your whole Drive{% endif %}.
+    Open a folder to look inside first.</p>
   <div id="drive-browser"
        hx-get="/drive/browse?folder={{ browse_root }}&home={{ browse_root }}"
        hx-trigger="load">
     <p class="muted">loading your Drive…</p>
   </div>
+  <p style="margin-top:1rem">
+    <a href="/" class="wz-link">✓ Scope set — go scan &amp; watch progress &rarr;</a>
+  </p>
   {% else %}
   <p class="muted">Connect Google Drive first (step 1) to browse your folders.</p>
   {% endif %}

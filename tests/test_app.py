@@ -307,3 +307,74 @@ def test_brand_pages_filter_and_correction(config) -> None:
         queue = ui.get("/brands/photos", params={"queue": 1})
         assert "blurry.jpg" not in queue.text
     _ = confident
+
+
+def test_run_full_scan_chains_pipeline(config, tmp_path, monkeypatch) -> None:
+    """One 'Run full scan' click runs sync -> exact -> near -> similar."""
+    import numpy as np
+
+    from tests.fakes import FakeDriveClient, FakeEmbedder, make_file
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "token.json").write_text("{}")  # Drive connected (OAuth)
+    files = [make_file("a", md5="dup", size=2000), make_file("b", md5="dup", size=1000)]
+    vec = np.random.default_rng(1).normal(size=512).astype(np.float32)
+    vec /= np.linalg.norm(vec)
+
+    app = create_app(
+        config=config,
+        drive_client_factory=lambda: FakeDriveClient(files),
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        embedder_factory=lambda c: FakeEmbedder({"a": vec, "b": vec}),
+    )
+    with TestClient(app) as ui:
+        resp = ui.post("/scans/all")
+        assert resp.status_code == 200
+        ui.app = app
+        app.state.runner.wait(timeout=30)
+
+    conn = connect(config.db_path)
+    done = {
+        r["stage"]
+        for r in conn.execute("SELECT DISTINCT stage FROM scans WHERE status = 'done'")
+    }
+    n_exact = conn.execute(
+        "SELECT COUNT(*) AS n FROM groups WHERE tier = 'exact'"
+    ).fetchone()["n"]
+    conn.close()
+    assert {"sync", "exact", "near", "similar"} <= done  # whole pipeline ran
+    assert n_exact == 1  # the byte-identical pair was grouped
+
+
+def test_full_scan_stops_when_a_stage_fails(config, tmp_path, monkeypatch) -> None:
+    from doppel.drive import CredentialsRequired
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "token.json").write_text("{}")
+
+    def boom():
+        raise CredentialsRequired("drive unavailable")
+
+    app = create_app(
+        config=config,
+        drive_client_factory=boom,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+    )
+    with TestClient(app) as ui:
+        ui.post("/scans/all")
+        app.state.runner.wait(timeout=10)
+
+    conn = connect(config.db_path)
+    stages = {
+        r["stage"]: r["status"] for r in conn.execute("SELECT stage, status FROM scans")
+    }
+    conn.close()
+    assert stages.get("sync") == "failed"
+    assert "exact" not in stages  # pipeline stopped after sync failed
+
+
+def test_full_scan_requires_drive_connected(client, monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)  # no token.json / service_account.json
+    resp = client.post("/scans/all")
+    assert resp.status_code == 200
+    assert "not connected" in resp.text

@@ -15,11 +15,13 @@
     {% endif %}
   </div>
 
+  {# scan the folder you're currently inside (or the whole Drive) — the abstract
+     "shared with me" list itself isn't a real folder, so it has no scan button #}
   {% if not (home == 'shared' and is_top) %}
   <form method="post" action="/setup/folder" class="decision scan-here">
     <input type="hidden" name="folder" value="{{ '' if can_scan_all else current.id }}">
     <button type="submit">
-      {% if can_scan_all %}Scan entire Drive{% else %}Scan “{{ current.name }}”{% endif %}
+      {% if can_scan_all %}Scan entire Drive{% else %}Scan “{{ current.name }}” — everything inside{% endif %}
     </button>
     {% if (can_scan_all and not saved_folder) or (not can_scan_all and saved_folder == current.id) %}
     <span class="badge badge-ok">current scope</span>
@@ -27,12 +29,22 @@
   </form>
   {% endif %}
 
+  {% if subfolders %}
+  <p class="muted browse-hint">Folders inside — open one, or scan a whole folder (its
+    subfolders are included):</p>
+  {% endif %}
   <ul class="folders">
     {% for f in subfolders %}
-    <li>
+    <li class="folder-row">
       <a class="folder" hx-get="/drive/browse?folder={{ f.id }}&home={{ home }}" hx-target="#drive-browser">
         📁 {{ f.name }}
       </a>
+      <form method="post" action="/setup/folder" class="folder-scan">
+        <input type="hidden" name="folder" value="{{ f.id }}">
+        <button type="submit" class="mini-btn {% if saved_folder == f.id %}mini-btn-on{% endif %}">
+          {% if saved_folder == f.id %}✓ scope{% else %}scan this{% endif %}
+        </button>
+      </form>
     </li>
     {% else %}
     <li class="muted">

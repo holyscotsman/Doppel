@@ -73,6 +73,16 @@
     ul.folders li { padding: 0.35rem 0.2rem; border-top: 1px solid #22262e; }
     ul.folders li a.folder { cursor: pointer; display: block; }
     ul.folders li a.folder:hover { color: #a5c6fb; text-decoration: none; }
+    li.folder-row { display: flex; align-items: center; justify-content: space-between;
+                    gap: 0.6rem; }
+    li.folder-row a.folder { flex: 1; }
+    .folder-scan { margin: 0; }
+    .mini-btn { background: #22262e; color: #c8ccd2; border: 1px solid #3a3f4a;
+                padding: 0.22rem 0.7rem; font-size: 0.78rem; font-weight: 500;
+                border-radius: 6px; white-space: nowrap; }
+    .mini-btn:hover { background: #2c313b; color: #fff; border-color: #8ab4f8; }
+    .mini-btn-on { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+    .browse-hint { margin: 0.3rem 0 0.5rem; font-size: 0.82rem; }
     .banner { background: #2a2312; border: 1px solid #5c4a1a; border-radius: 8px;
               padding: 0.7rem 1.2rem; margin: 1rem 0; }
     select, input[type="text"] { background: #101216; color: #e8eaed;
@@ -95,7 +105,20 @@
     .member dd { margin: 0 0 0.2rem 7.8rem; overflow-wrap: anywhere; }
     .progress { background: #2a2e37; border-radius: 4px; height: 8px; width: 220px;
                 overflow: hidden; }
-    .progress > div { background: #8ab4f8; height: 100%; }
+    .progress > div { background: #8ab4f8; height: 100%; transition: width 0.4s ease; }
+    .scan-controls { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+                     margin-bottom: 1rem; }
+    .scan-all-btn { background: #8ab4f8; color: #0b0d11; font-weight: 700;
+                    font-size: 1rem; padding: 0.6rem 1.4rem; border-radius: 8px; }
+    .scan-all-btn:hover:not(:disabled) { background: #a5c6fb; }
+    .scan-all-btn:disabled { background: #3a3f4a; color: #9aa0a6; }
+    table.scan-table td { border-bottom: 1px solid #22262e; padding: 0.5rem 0.8rem; }
+    tr.live-row { background: #1a2230; }
+    .stage-label { font-weight: 500; }
+    .ok-tick { color: #81c995; }
+    .dot-live { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%;
+                background: #8ab4f8; animation: pulse 1.1s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
     .pager { margin-top: 1rem; display: flex; gap: 1rem; }
   </style>
 </head>

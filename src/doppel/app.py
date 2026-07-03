@@ -55,6 +55,19 @@ PACKAGE_DIR = Path(__file__).parent
 # stages the UI can launch, in pipeline order; extended phase by phase
 UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate", "brand"]
 
+# the core detection pipeline the "Run full scan" button chains, in order
+PIPELINE_STAGES = ["sync", "exact", "near", "similar"]
+
+# plain-language names for the dashboard (the stage keys are jargon)
+STAGE_LABELS = {
+    "sync": "Find photos in Drive",
+    "exact": "Exact duplicates",
+    "near": "Near-duplicates",
+    "similar": "Similar photos",
+    "adjudicate": "AI double-check",
+    "brand": "Brand tags",
+}
+
 PAGE_SIZE = 20
 
 
@@ -279,8 +292,9 @@ def create_app(
             return app.state.vlm
 
     def scan_overview(conn: sqlite3.Connection) -> list[dict]:
-        """Latest scans row per UI stage, plus whether it is the live job."""
-        running = app.state.runner.running_stage()
+        """Latest scans row per UI stage, with a plain-language label. Which
+        stage is live comes from its scans-row status (works for both a single
+        stage and the chained 'all' pipeline)."""
         overview = []
         for stage in UI_STAGES:
             row = conn.execute(
@@ -290,51 +304,61 @@ def create_app(
             overview.append(
                 {
                     "stage": stage,
+                    "label": STAGE_LABELS[stage],
                     "scan": dict(row) if row else None,
-                    "is_running": stage == running,
                 }
             )
         return overview
 
+    def _build_stage_callable(
+        conn: sqlite3.Connection, stage: str
+    ) -> Callable[[], object]:
+        """Acquire a stage's dependencies and return a zero-arg runner. Raises
+        if a dependency (credentials, model, shared folders) is unavailable."""
+        if stage == "sync":
+            client = drive_client_factory()
+            folder_ids = _resolve_scan_roots(client, config)
+            return lambda: run_sync(conn, client, config.cache_dir, folder_ids)
+        if stage == "exact":
+            return lambda: run_exact(conn)
+        if stage == "near":
+            fetcher = get_fetcher()
+            return lambda: run_near(conn, fetcher, config)
+        if stage == "similar":
+            fetcher, embedder = get_fetcher(), get_embedder()
+            return lambda: run_similar(conn, fetcher, embedder, config)
+        if stage == "adjudicate":
+            fetcher, vlm = get_fetcher(), get_vlm()
+            return lambda: run_adjudicate(conn, fetcher, vlm, config)
+        if stage == "brand":
+            fetcher, vlm = get_fetcher(), get_vlm()
+            return lambda: run_brand(conn, fetcher, vlm, config)
+        raise ValueError(f"unknown stage {stage!r}")
+
     def run_stage_job(stage: str) -> None:
+        """Run one stage, or the whole detection pipeline for stage == 'all'.
+        The interactive OAuth flow is never run here: it would block the worker
+        forever if the consent tab is missed."""
         conn = connect(config.db_path)
         try:
-            # acquire stage dependencies first; a failure here (e.g. missing
-            # OAuth credentials) happens before the stage's own start_scan,
-            # so record it in the ledger — otherwise the click would look
-            # like a silent no-op in the UI. The interactive OAuth flow is
-            # never run on this worker thread: it would block the runner
-            # forever if the consent tab is missed.
-            try:
-                job: Callable[[], object]
-                if stage == "sync":
-                    client = drive_client_factory()
-                    folder_ids = _resolve_scan_roots(client, config)
-                    job = lambda: run_sync(  # noqa: E731
-                        conn, client, config.cache_dir, folder_ids
-                    )
-                elif stage == "exact":
-                    job = lambda: run_exact(conn)  # noqa: E731
-                elif stage == "near":
-                    fetcher = get_fetcher()
-                    job = lambda: run_near(conn, fetcher, config)  # noqa: E731
-                elif stage == "similar":
-                    fetcher, embedder = get_fetcher(), get_embedder()
-                    job = lambda: run_similar(conn, fetcher, embedder, config)  # noqa: E731
-                elif stage == "adjudicate":
-                    fetcher, vlm = get_fetcher(), get_vlm()
-                    job = lambda: run_adjudicate(conn, fetcher, vlm, config)  # noqa: E731
-                elif stage == "brand":
-                    fetcher, vlm = get_fetcher(), get_vlm()
-                    job = lambda: run_brand(conn, fetcher, vlm, config)  # noqa: E731
-                else:
+            stages = PIPELINE_STAGES if stage == "all" else [stage]
+            for st in stages:
+                # a dependency failure happens before the stage's own
+                # start_scan, so record it in the ledger — otherwise the click
+                # would look like a silent no-op in the UI
+                try:
+                    job = _build_stage_callable(conn, st)
+                except Exception as exc:
+                    scan_id = start_scan(conn, st)
+                    detail = exc.detail if isinstance(exc, HTTPException) else exc
+                    fail_scan(conn, scan_id, f"{type(exc).__name__}: {detail}")
+                    return  # stop the pipeline on a dependency failure
+                try:
+                    job()
+                except Exception:
+                    # the stage recorded its own failure; stop the pipeline —
+                    # later stages depend on this one's output
                     return
-            except Exception as exc:
-                scan_id = start_scan(conn, stage)
-                detail = exc.detail if isinstance(exc, HTTPException) else exc
-                fail_scan(conn, scan_id, f"{type(exc).__name__}: {detail}")
-                return
-            job()
         finally:
             conn.close()
 
@@ -646,6 +670,7 @@ def create_app(
                 "tier_counts": tier_counts,
                 "trash_count": trash_count,
                 "scans": scan_overview(conn),
+                "any_running": app.state.runner.running_stage() is not None,
                 "needs_setup": auth_mode() is None,
                 "folder_id": config.drive_folder_id,
             },
@@ -654,7 +679,12 @@ def create_app(
     @app.get("/partials/scans", response_class=HTMLResponse)
     def scans_partial(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         return templates.TemplateResponse(
-            request, "_scan_status.html", {"scans": scan_overview(conn)}
+            request,
+            "_scan_status.html",
+            {
+                "scans": scan_overview(conn),
+                "any_running": app.state.runner.running_stage() is not None,
+            },
         )
 
     @app.post("/scans/{stage}", response_class=HTMLResponse)
@@ -662,16 +692,18 @@ def create_app(
         request: Request, stage: str, conn: sqlite3.Connection = Depends(get_conn)
     ):
         error = None
-        if stage not in UI_STAGES:
+        if stage != "all" and stage not in UI_STAGES:
             raise HTTPException(status_code=404, detail=f"unknown stage {stage!r}")
-        if stage == "sync" and auth_mode() is None:
+        if stage in ("sync", "all") and auth_mode() is None:
             error = "Google Drive is not connected yet — open the setup wizard."
         elif not app.state.runner.start(stage, lambda: run_stage_job(stage)):
             error = "a job is already running"
         # the error goes into #scan-error via an out-of-band swap: the polled
         # #scan-status region is replaced every 2s, which would erase it
         table = templates.get_template("_scan_status.html").render(
-            request=request, scans=scan_overview(conn)
+            request=request,
+            scans=scan_overview(conn),
+            any_running=app.state.runner.running_stage() is not None,
         )
         message = f'<p class="error">{html.escape(error)}</p>' if error else ""
         oob = f'<div id="scan-error" hx-swap-oob="true">{message}</div>'
