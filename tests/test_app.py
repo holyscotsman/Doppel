@@ -131,3 +131,29 @@ def test_near_stage_via_ui(client, config) -> None:
     # both photos get the fake fetcher's default image -> one near group
     page = client.get("/groups", params={"tier": "near"})
     assert "2 photos" in page.text
+
+
+def test_similar_stage_via_ui(config) -> None:
+    import numpy as np
+
+    from tests.fakes import FakeEmbedder, FakeImageFetcher
+
+    conn = connect(config.db_path)
+    insert_photo(conn, "s1", md5="m1")
+    insert_photo(conn, "s2", md5="m2")
+    conn.close()
+
+    vec = np.random.default_rng(5).normal(size=512).astype(np.float32)
+    vec /= np.linalg.norm(vec)
+    app = create_app(
+        config=config,
+        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
+        embedder_factory=lambda cfg: FakeEmbedder({"s1": vec, "s2": vec}),
+    )
+    with TestClient(app) as ui:
+        resp = ui.post("/scans/similar")
+        assert resp.status_code == 200
+        app.state.runner.wait(timeout=10)
+
+        page = ui.get("/groups", params={"tier": "similar"})
+        assert "2 photos" in page.text

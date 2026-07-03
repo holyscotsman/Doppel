@@ -66,3 +66,24 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     return conn
+
+
+def ensure_vec_schema(conn: sqlite3.Connection) -> None:
+    """Load the sqlite-vec extension and create the embeddings virtual table.
+
+    Called by the similar stage (and anything reading vectors) rather than
+    connect(), so the core schema works without the extension present.
+    """
+    import sqlite_vec
+
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(
+          photo_id  INTEGER PRIMARY KEY,
+          embedding FLOAT[512] distance_metric=cosine
+        )
+        """
+    )

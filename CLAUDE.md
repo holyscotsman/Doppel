@@ -40,8 +40,19 @@ Core: `make setup`, `make run`, `make test`, `make lint`, `make scan`.
 - All persistent state lives in SQLite. No JSON/pickle state files.
 - Jobs must be idempotent and resumable: skip photos whose stage output
   (hash, embedding) already exists.
-- Implement exactly one phase from SPEC.md at a time. Do not start the
-  next phase unless explicitly asked.
+- Work through SPEC.md phases in order. Advance to the next phase only
+  when the current phase's acceptance criteria pass under
+  self-verification: `make test` and `make lint` green, the server boots,
+  and the criteria are exercised against fixtures and the fake Drive
+  client — never the real Drive API.
+- Stop and ask the human only for what cannot be self-verified: the OAuth
+  consent flow, judgments about results on the real photo library, and
+  threshold tuning.
+- Do not invent work. Record bugs, optimization ideas, and UI/UX
+  improvements in BACKLOG.md instead of acting on them, unless they block
+  the current phase's acceptance criteria. Stop when the instructed phase
+  range is complete.
+- Commit at every phase boundary.
 - `ruff` for lint + format, `pytest` for tests, type hints on all public
   functions. Tests must not hit the real Drive API — use the fake client.
 - Do not add Claude as a co-author on git commits.

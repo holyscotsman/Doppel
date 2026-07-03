@@ -15,14 +15,16 @@ from fastapi.templating import Jinja2Templates
 from doppel.config import Config, load_config
 from doppel.db import connect
 from doppel.drive import GoogleDriveClient, ImageFetcher, get_credentials
+from doppel.embed import ClipEmbedder, Embedder
 from doppel.jobs import JobRunner, run_sync
 from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
+from doppel.stages.similar import run_similar
 
 PACKAGE_DIR = Path(__file__).parent
 
 # stages the UI can launch, in pipeline order; extended phase by phase
-UI_STAGES = ["sync", "exact", "near"]
+UI_STAGES = ["sync", "exact", "near", "similar"]
 
 PAGE_SIZE = 20
 
@@ -44,15 +46,18 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
 def create_app(
     config: Config | None = None,
     fetcher_factory: Callable[[Config], ImageFetcher] | None = None,
+    embedder_factory: Callable[[Config], Embedder] | None = None,
 ) -> FastAPI:
-    """Build the app. Tests inject a Config and a fake fetcher factory."""
+    """Build the app. Tests inject a Config and fake fetcher/embedder factories."""
     config = config or load_config()
     fetcher_factory = fetcher_factory or _build_real_fetcher
+    embedder_factory = embedder_factory or (lambda cfg: ClipEmbedder(cfg.clip_model))
 
     app = FastAPI(title="doppel")
     app.state.config = config
     app.state.runner = JobRunner()
     app.state.fetcher = None  # built lazily: needs OAuth credentials
+    app.state.embedder = None  # built lazily: loads the CLIP model
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     app.mount(
@@ -70,6 +75,11 @@ def create_app(
         if app.state.fetcher is None:
             app.state.fetcher = fetcher_factory(config)
         return app.state.fetcher
+
+    def get_embedder() -> Embedder:
+        if app.state.embedder is None:
+            app.state.embedder = embedder_factory(config)
+        return app.state.embedder
 
     def scan_overview(conn: sqlite3.Connection) -> list[dict]:
         """Latest scans row per UI stage, plus whether it is the live job."""
@@ -99,6 +109,8 @@ def create_app(
                 run_exact(conn)
             elif stage == "near":
                 run_near(conn, get_fetcher(), config)
+            elif stage == "similar":
+                run_similar(conn, get_fetcher(), get_embedder(), config)
         finally:
             conn.close()
 

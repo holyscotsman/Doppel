@@ -154,3 +154,25 @@ def insert_photo(
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def drive_id_from_path(path) -> str:
+    """Recover the drive_id from a cache path like cache/{drive_id}_{size}.jpg."""
+    from pathlib import Path
+
+    return Path(path).name.rsplit("_", 1)[0]
+
+
+class FakeEmbedder:
+    """Returns canned vectors keyed by drive_id; records embed calls."""
+
+    def __init__(self, vectors: dict[str, object]) -> None:
+        self.vectors = vectors
+        self.calls: list[list[str]] = []
+
+    def embed(self, paths):
+        import numpy as np
+
+        ids = [drive_id_from_path(p) for p in paths]
+        self.calls.append(ids)
+        return np.stack([self.vectors[i] for i in ids]).astype(np.float32)
