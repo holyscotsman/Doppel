@@ -1,0 +1,31 @@
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<table>
+  <tr><th>stage</th><th>status</th><th>progress</th><th>finished</th><th></th></tr>
+  {% for item in scans %}
+  <tr>
+    <td>{{ item.stage }}</td>
+    <td>
+      {% if item.is_running %}running
+      {% elif item.scan %}{{ item.scan.status }}
+      {% else %}<span class="muted">never run</span>{% endif %}
+    </td>
+    <td>
+      {% if item.scan %}
+        {% set s = item.scan %}
+        {% if item.is_running and s.total %}
+          <div class="progress"><div style="width: {{ (100 * s.processed / s.total) | round }}%"></div></div>
+        {% endif %}
+        {{ s.processed }}{% if s.total is not none %} / {{ s.total }}{% endif %}
+        {% if s.status == 'failed' and s.error %}<div class="error">{{ s.error }}</div>{% endif %}
+      {% endif %}
+    </td>
+    <td class="muted">{{ item.scan.finished_at if item.scan and item.scan.finished_at else "" }}</td>
+    <td>
+      <button hx-post="/scans/{{ item.stage }}" hx-target="#scan-status"
+              {% if item.is_running %}disabled{% endif %}>
+        run {{ item.stage }}
+      </button>
+    </td>
+  </tr>
+  {% endfor %}
+</table>

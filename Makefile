@@ -9,7 +9,7 @@ setup: ## Install Python and project dependencies into .venv
 	uv sync
 
 run: ## Serve the web UI on 127.0.0.1:8000
-	@echo "run: implemented in Phase 2" && exit 1
+	uv run uvicorn --factory doppel.app:build --host 127.0.0.1 --port 8000
 
 test: ## Run the test suite
 	uv run pytest

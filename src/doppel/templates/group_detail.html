@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}group {{ group.id }} — doppel{% endblock %}
+{% block content %}
+<h2>
+  group {{ group.id }} <span class="muted">({{ group.tier }})</span>
+  {% if group.color_variant %}<span class="badge">color variant</span>{% endif %}
+</h2>
+<p><a href="/groups?tier={{ group.tier }}">&larr; back to {{ group.tier }} groups</a></p>
+<div class="members">
+  {% for p in members %}
+  <div class="member">
+    <img class="thumb-lg" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+    <dl>
+      <dt>name</dt><dd>{{ p.name }}</dd>
+      <dt>dimensions</dt><dd>{% if p.width %}{{ p.width }} &times; {{ p.height }}{% else %}?{% endif %}</dd>
+      <dt>file size</dt><dd>{{ "{:,}".format(p.size) if p.size else "?" }} bytes</dd>
+      <dt>created</dt><dd>{{ p.created_time or "?" }}</dd>
+      <dt>modified</dt><dd>{{ p.modified_time or "?" }}</dd>
+      {% if p.score is not none %}<dt>score</dt><dd>{{ "%.4f" | format(p.score) }}</dd>{% endif %}
+      <dt>status</dt><dd>{{ p.status }}</dd>
+    </dl>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

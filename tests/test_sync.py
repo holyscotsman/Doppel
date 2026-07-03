@@ -2,14 +2,8 @@ import sqlite3
 
 import pytest
 
-from doppel.db import connect
 from doppel.jobs import run_sync
 from tests.fakes import FakeDriveClient, make_file
-
-
-@pytest.fixture
-def conn(tmp_path) -> sqlite3.Connection:
-    return connect(tmp_path / "test.db")
 
 
 def photos(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Library</h2>
+<div class="cards">
+  <div class="card">
+    <div class="big">{{ photo_count }}</div>
+    <div class="label">active photos</div>
+  </div>
+  {% for tier in ["exact", "near", "similar", "vlm"] %}
+  <div class="card">
+    <div class="big">{{ tier_counts.get(tier, 0) }}</div>
+    <div class="label"><a href="/groups?tier={{ tier }}">{{ tier }} groups</a></div>
+  </div>
+  {% endfor %}
+</div>
+
+<h2>Scans</h2>
+<div id="scan-status" hx-get="/partials/scans" hx-trigger="every 2s" hx-swap="innerHTML">
+  {% include "_scan_status.html" %}
+</div>
+{% endblock %}

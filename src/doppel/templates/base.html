@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}doppel{% endblock %}</title>
+  <script src="/static/htmx.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 0;
+           background: #101216; color: #e8eaed; }
+    a { color: #8ab4f8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { padding: 0.8rem 1.5rem; border-bottom: 1px solid #2a2e37;
+             display: flex; gap: 1.5rem; align-items: baseline; }
+    header h1 { font-size: 1.1rem; margin: 0; }
+    header h1 a { color: #e8eaed; }
+    main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
+    .card { background: #1a1e26; border: 1px solid #2a2e37; border-radius: 8px;
+            padding: 1rem 1.4rem; min-width: 130px; }
+    .card .big { font-size: 1.7rem; font-weight: 600; }
+    .card .label { color: #9aa0a6; font-size: 0.85rem; }
+    button { background: #8ab4f8; color: #101216; border: none; padding: 0.45rem 1rem;
+             border-radius: 6px; font-size: 0.9rem; cursor: pointer; font-weight: 600; }
+    button:disabled { background: #3a3f4a; color: #9aa0a6; cursor: default; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 0.5rem 0.8rem; border-bottom: 1px solid #2a2e37; }
+    .muted { color: #9aa0a6; }
+    .error { color: #f28b82; margin: 0.5rem 0; }
+    .badge { background: #5f3dc4; color: #fff; border-radius: 4px; padding: 0.1rem 0.45rem;
+             font-size: 0.75rem; }
+    .thumb { width: 96px; height: 96px; object-fit: cover; border-radius: 6px;
+             background: #2a2e37; }
+    .thumb-lg { width: 320px; height: 320px; object-fit: contain; border-radius: 6px;
+                background: #2a2e37; }
+    .strip { display: flex; gap: 0.4rem; }
+    .members { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+    .member { background: #1a1e26; border: 1px solid #2a2e37; border-radius: 8px;
+              padding: 1rem; width: 340px; }
+    .member dl { margin: 0.7rem 0 0; font-size: 0.85rem; }
+    .member dt { color: #9aa0a6; float: left; clear: left; width: 7.5rem; }
+    .member dd { margin: 0 0 0.2rem 7.8rem; overflow-wrap: anywhere; }
+    .progress { background: #2a2e37; border-radius: 4px; height: 8px; width: 220px;
+                overflow: hidden; }
+    .progress > div { background: #8ab4f8; height: 100%; }
+    .pager { margin-top: 1rem; display: flex; gap: 1rem; }
+  </style>
+</head>
+<body>
+<header>
+  <h1><a href="/">doppel</a></h1>
+  <nav>
+    <a href="/groups?tier=exact">exact</a>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

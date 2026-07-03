@@ -57,3 +57,92 @@ class FakeDriveClient:
         if end < len(self.files):
             page["nextPageToken"] = str(end)
         return page
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, content: bytes = b"") -> None:
+        self.status_code = status_code
+        self.content = content
+
+
+class FakeSession:
+    """Returns queued responses in order and records requested URLs."""
+
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = list(responses)
+        self.requests: list[str] = []
+
+    def get(self, url: str) -> FakeResponse:
+        self.requests.append(url)
+        return self.responses.pop(0)
+
+
+class FakeThumbClient:
+    """Fake of the Drive metadata/media calls the fetcher uses."""
+
+    def __init__(self, link: str | None = None, file_bytes: bytes = b"") -> None:
+        self.link = link
+        self.file_bytes = file_bytes
+        self.link_requests: list[str] = []
+        self.download_requests: list[str] = []
+
+    def get_thumbnail_link(self, drive_id: str) -> str | None:
+        self.link_requests.append(drive_id)
+        return self.link
+
+    def download_file(self, drive_id: str) -> bytes:
+        self.download_requests.append(drive_id)
+        return self.file_bytes
+
+
+def jpeg_bytes(size: tuple[int, int] = (32, 32), color: str = "red") -> bytes:
+    """A real JPEG for tests, generated with Pillow."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+class FakeImageFetcher:
+    """Serves generated JPEGs from the cache dir without any network."""
+
+    def __init__(self, cache_dir) -> None:
+        from pathlib import Path
+
+        self.cache_dir = Path(cache_dir)
+        self.calls: list[tuple[str, int | str]] = []
+
+    def get(self, drive_id: str, size: int | str = 512):
+        self.calls.append((drive_id, size))
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        path = self.cache_dir / f"{drive_id}_{size}.jpg"
+        if not path.exists():
+            path.write_bytes(jpeg_bytes())
+        return path
+
+
+def insert_photo(
+    conn,
+    drive_id: str,
+    name: str = "photo.jpg",
+    md5: str | None = None,
+    size: int | None = 1000,
+    status: str = "active",
+    thumbnail_link: str | None = None,
+    width: int | None = 800,
+    height: int | None = 600,
+) -> int:
+    """Insert a photos row directly (bypassing sync) and return its id."""
+    cur = conn.execute(
+        """
+        INSERT INTO photos (drive_id, name, mime_type, size, md5, width, height,
+                            thumbnail_link, status)
+        VALUES (?, ?, 'image/jpeg', ?, ?, ?, ?, ?, ?)
+        """,
+        (drive_id, name, size, md5, width, height, thumbnail_link, status),
+    )
+    conn.commit()
+    return int(cur.lastrowid)

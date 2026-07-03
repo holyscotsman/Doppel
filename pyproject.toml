@@ -4,12 +4,19 @@ version = "0.1.0"
 description = "Scan a Google Drive photo library and surface duplicates for human review"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.139.0",
     "google-api-python-client>=2.198.0",
     "google-auth-oauthlib>=1.4.0",
+    "jinja2>=3.1.6",
+    "pillow>=12.3.0",
+    "requests>=2.34.2",
+    "uvicorn>=0.49.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
+    "httpx2>=2.5.0",
     "pytest>=8.0",
     "ruff>=0.5",
 ]
@@ -31,3 +38,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency injection idiom: Depends() in defaults is intentional
+extend-immutable-calls = ["fastapi.Depends"]

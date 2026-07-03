@@ -4,13 +4,16 @@ idempotent: re-running skips or upserts, never duplicates."""
 from __future__ import annotations
 
 import sqlite3
+import threading
+import traceback
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from doppel.drive import DriveClient
 
 
-def _now() -> str:
+def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -24,12 +27,12 @@ def start_scan(conn: sqlite3.Connection, stage: str) -> int:
     conn.execute(
         "UPDATE scans SET status = 'failed', error = 'interrupted', finished_at = ? "
         "WHERE stage = ? AND status = 'running'",
-        (_now(), stage),
+        (now(), stage),
     )
     cur = conn.execute(
         "INSERT INTO scans (stage, status, processed, started_at) "
         "VALUES (?, 'running', 0, ?)",
-        (stage, _now()),
+        (stage, now()),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -38,7 +41,7 @@ def start_scan(conn: sqlite3.Connection, stage: str) -> int:
 def finish_scan(conn: sqlite3.Connection, scan_id: int, total: int) -> None:
     conn.execute(
         "UPDATE scans SET status = 'done', total = ?, finished_at = ? WHERE id = ?",
-        (total, _now(), scan_id),
+        (total, now(), scan_id),
     )
     conn.commit()
 
@@ -46,7 +49,7 @@ def finish_scan(conn: sqlite3.Connection, scan_id: int, total: int) -> None:
 def fail_scan(conn: sqlite3.Connection, scan_id: int, error: str) -> None:
     conn.execute(
         "UPDATE scans SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
-        (error, _now(), scan_id),
+        (error, now(), scan_id),
     )
     conn.commit()
 
@@ -122,3 +125,47 @@ def run_sync(conn: sqlite3.Connection, client: DriveClient) -> int:
         fail_scan(conn, scan_id, f"{type(exc).__name__}: {exc}")
         raise
     return scan_id
+
+
+class JobRunner:
+    """One background worker thread. Long-running stages execute here and
+    report progress to the scans table; the UI polls that table."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stage: str | None = None
+
+    def running_stage(self) -> str | None:
+        """The stage currently executing, or None when idle."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self._stage
+            return None
+
+    def start(self, stage: str, target: Callable[[], None]) -> bool:
+        """Run target on the worker thread. Returns False if a job is
+        already running (one job at a time, per SPEC architecture)."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            def _run() -> None:
+                try:
+                    target()
+                except Exception:
+                    # the job already recorded failure in the scans table;
+                    # keep the worker thread from dying loudly
+                    traceback.print_exc()
+
+            self._stage = stage
+            self._thread = threading.Thread(target=_run, daemon=True)
+            self._thread.start()
+            return True
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Block until the current job finishes. Used by tests."""
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)

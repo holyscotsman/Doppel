@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ tier }} groups — doppel{% endblock %}
+{% block content %}
+<h2>{{ tier }} groups <span class="muted">({{ total }})</span></h2>
+{% if not groups %}
+<p class="muted">No groups. Run the {{ tier }} stage from the <a href="/">dashboard</a>.</p>
+{% endif %}
+<table>
+  {% for g in groups %}
+  <tr>
+    <td><a href="/groups/{{ g.id }}">group {{ g.id }}</a></td>
+    <td>
+      <div class="strip">
+        {% for p in strips[g.id] %}
+        <a href="/groups/{{ g.id }}"><img class="thumb" loading="lazy" src="/thumb/{{ p.id }}" alt=""></a>
+        {% endfor %}
+      </div>
+    </td>
+    <td>{{ g.members }} photos</td>
+    <td>{% if g.color_variant %}<span class="badge">color variant</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="pager">
+  {% if page > 1 %}<a href="/groups?tier={{ tier }}&page={{ page - 1 }}">&larr; prev</a>{% endif %}
+  <span class="muted">page {{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="/groups?tier={{ tier }}&page={{ page + 1 }}">next &rarr;</a>{% endif %}
+</div>
+{% endblock %}
