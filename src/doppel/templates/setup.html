@@ -21,14 +21,24 @@
       <div style="margin:0.5rem 0"><code>{{ sa_email }}</code></div>
       Then pick that folder in step 3 below. No sign-in, nothing expires.
     </div>
-    <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
-      <input type="file" name="credentials" accept=".json,application/json">
-      <button type="submit">replace key file</button>
-    </form>
+    <p class="decision" style="gap:1rem; align-items:center">
+      <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision" style="margin:0">
+        <input type="file" name="credentials" accept=".json,application/json">
+        <button type="submit">replace key file</button>
+      </form>
+      <form method="post" action="/setup/disconnect" style="margin:0">
+        <button type="submit" class="ghost-btn">disconnect</button>
+      </form>
+    </p>
   {% elif auth_mode == 'oauth' %}
-    <form method="post" action="/oauth/start">
-      <button type="submit" class="google-btn">Re-connect Google Drive</button>
-    </form>
+    <p class="decision" style="gap:1rem; align-items:center">
+      <form method="post" action="/oauth/start" style="margin:0">
+        <button type="submit" class="google-btn">Re-connect Google Drive</button>
+      </form>
+      <form method="post" action="/setup/disconnect" style="margin:0">
+        <button type="submit" class="ghost-btn">disconnect</button>
+      </form>
+    </p>
     <p class="muted">Read-only access. doppel never changes anything in your Drive.</p>
   {% elif credentials_present %}
     <form method="post" action="/oauth/start">

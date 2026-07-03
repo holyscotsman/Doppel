@@ -290,7 +290,7 @@ def test_folder_scoped_sync(conn, tmp_path) -> None:
         conn,
         FakeDriveClient(files, folders=folders),
         tmp_path / "cache",
-        folder_id="root12345678",
+        folder_ids=["root12345678"],
     )
 
     rows = {
@@ -305,7 +305,7 @@ def test_folder_scoped_sync(conn, tmp_path) -> None:
         conn,
         FakeDriveClient(files, folders=folders),
         tmp_path / "cache",
-        folder_id="root12345678",
+        folder_ids=["root12345678"],
     )
     rows = {
         r["drive_id"]: r["status"]
@@ -748,3 +748,120 @@ def test_service_account_sync_via_ui(tmp_path, monkeypatch):
     rows = {r["drive_id"] for r in conn.execute("SELECT drive_id FROM photos")}
     conn.close()
     assert rows == {"p1"}  # only the shared folder's file was synced
+
+
+# --- Fixes from the service-account review ---
+
+
+def test_service_account_empty_scope_scans_shared_folders(tmp_path, monkeypatch):
+    """SA mode + no folder picked must scan the shared folders, not run an
+    unscoped My-Drive query (which is empty for a service account and would
+    wrongly mark the whole inventory missing)."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )  # drive_folder_id = "" (no explicit scope)
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    files = [
+        make_file("shared1", md5="a", parent="photos_folder"),
+        make_file("elsewhere", md5="b", parent="not_shared"),
+    ]
+
+    class SAClient(FakeDriveClient):
+        def list_shared_folders(self):
+            return [{"id": "photos_folder", "name": "Photos"}]
+
+        def list_folders_page(self, parent_id, page_token=None):
+            return {"files": []}
+
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: SAClient(files, folders={}),
+    )
+    with TestClient(app) as client:
+        client.post("/scans/sync")
+        app.state.runner.wait(timeout=10)
+
+    conn = connect(tmp_path / "t.db")
+    rows = {r["drive_id"] for r in conn.execute("SELECT drive_id FROM photos")}
+    conn.close()
+    assert rows == {"shared1"}  # only the shared folder, not the whole world
+
+
+def test_service_account_nothing_shared_errors_not_wipes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    # a pre-existing photo that must NOT be wiped to 'missing'
+    conn = connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO photos (drive_id, name, mime_type, status) "
+        "VALUES ('old', 'o.jpg', 'image/jpeg', 'active')"
+    )
+    conn.commit()
+    conn.close()
+
+    class NoShareClient(FakeDriveClient):
+        def list_shared_folders(self):
+            return []
+
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: NoShareClient([], folders={}),
+    )
+    with TestClient(app) as client:
+        client.post("/scans/sync")
+        app.state.runner.wait(timeout=10)
+
+    conn = connect(tmp_path / "t.db")
+    scan = conn.execute(
+        "SELECT status, error FROM scans WHERE stage='sync' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    status = conn.execute("SELECT status FROM photos WHERE drive_id='old'").fetchone()
+    conn.close()
+    assert scan["status"] == "failed"
+    assert "shared" in scan["error"].lower()
+    assert status["status"] == "active"  # inventory NOT wiped
+
+
+def test_browse_up_to_real_root_offers_entire_drive(wizard):
+    """Real Drive returns My Drive's actual id (not 'root'); 'up' to it must
+    still offer 'Scan entire Drive', keyed on parentlessness not a string."""
+    real_root = "0ABCrealrootid"
+    tree = {
+        real_root: ("My Drive", None, ["photos_x"]),
+        "photos_x": ("Photos", real_root, []),
+    }
+    app = create_app(
+        config_path=wizard.config_file,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: FakeBrowseClient(tree),
+    )
+    with TestClient(app) as client:
+        # 'up' navigates to the real root id (has no parent)
+        page = client.get("/drive/browse", params={"folder": real_root, "home": "root"})
+        assert "Scan entire Drive" in page.text
+        assert "current scope" in page.text  # empty scope == entire Drive
+
+
+def test_disconnect_removes_active_credential(wizard, tmp_path):
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    (tmp_path / "token.json").write_text("{}")
+    # SA takes precedence; disconnect should drop it and fall back to OAuth
+    resp = wizard.post("/setup/disconnect", follow_redirects=False)
+    assert resp.status_code == 303
+    assert not (tmp_path / "service_account.json").exists()
+    from doppel.app import auth_mode
+
+    assert auth_mode() == "oauth"  # recovered, not stuck
+
+    # disconnecting again drops the OAuth token too
+    wizard.post("/setup/disconnect")
+    assert not (tmp_path / "token.json").exists()
+    assert auth_mode() is None

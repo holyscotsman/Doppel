@@ -130,7 +130,7 @@ def run_sync(
     conn: sqlite3.Connection,
     client: DriveClient,
     cache_dir: Path | str | None = None,
-    folder_id: str | None = None,
+    folder_ids: list[str] | None = None,
 ) -> int:
     """Full inventory sync: upsert every Drive image, mark unseen rows missing.
 
@@ -138,25 +138,39 @@ def run_sync(
     account changes nothing. When a file's content changed in place (same
     drive_id, different md5), its derived state is invalidated.
 
-    folder_id scopes the scan to that folder's subtree (walked recursively —
-    Drive has no recursive query). Photos synced earlier but outside the
-    scope are marked 'missing': out of scope means out of the review set.
+    folder_ids=None scans the whole Drive (one unscoped query). A list of
+    folder ids scopes the scan to the union of those folders' subtrees
+    (walked recursively — Drive has no recursive query). This is how
+    service-account mode scans the folders shared with it, and how the user
+    scopes to one folder. Photos synced earlier but outside the scope are
+    marked 'missing': out of scope means out of the review set.
     """
     scan_id = start_scan(conn, "sync")
     try:
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen (drive_id TEXT PRIMARY KEY)")
         conn.execute("DELETE FROM seen")
 
-        # each batch is one files.list query: the whole Drive, or a chunk of
-        # parent-folder clauses from the scoped subtree
-        if folder_id:
-            folder_ids = collect_folder_tree(client, folder_id)
-            batches: list[list[str] | None] = [
-                folder_ids[i : i + PARENT_QUERY_CHUNK]
-                for i in range(0, len(folder_ids), PARENT_QUERY_CHUNK)
-            ]
+        # each batch is one files.list query: the whole Drive (None), or a
+        # chunk of parent-folder clauses from the scoped subtrees
+        if folder_ids is None:
+            batches: list[list[str] | None] = [None]
         else:
-            batches = [None]
+            all_folders: set[str] = set()
+            for root in folder_ids:
+                all_folders.update(collect_folder_tree(client, root))
+            ordered = sorted(all_folders)
+            batches = [
+                ordered[i : i + PARENT_QUERY_CHUNK]
+                for i in range(0, len(ordered), PARENT_QUERY_CHUNK)
+            ]
+
+        # an empty scope (folder_ids == []) means "no accessible folders" —
+        # scan nothing and, crucially, DON'T mark the whole inventory missing.
+        # (never pass parent_ids=[] to the client: the real client treats a
+        # falsy parent list as an unscoped whole-Drive query.)
+        if not batches:
+            finish_scan(conn, scan_id, total=0)
+            return scan_id
 
         processed = 0
         for parent_ids in batches:

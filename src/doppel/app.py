@@ -81,6 +81,28 @@ def build_drive_credentials() -> object:
     )
 
 
+def _resolve_scan_roots(client: object, config: Config) -> list[str] | None:
+    """Which folders a sync should walk, given the auth mode and scope.
+
+    - explicit folder scope -> just that folder
+    - OAuth, no scope -> None (whole My Drive, one unscoped query)
+    - service account, no scope -> every folder shared with it (its own My
+      Drive is empty, so an unscoped query would find nothing and wrongly
+      mark the whole inventory missing)
+    """
+    if config.drive_folder_id:
+        return [config.drive_folder_id]
+    if auth_mode() == "service_account":
+        shared = client.list_shared_folders()
+        if not shared:
+            raise RuntimeError(
+                "No folders are shared with the service account yet — in Google "
+                "Drive, share a folder with the account's email, then sync."
+            )
+        return [f["id"] for f in shared]
+    return None
+
+
 def _build_real_fetcher(config: Config) -> ImageFetcher:
     from google.auth.transport.requests import AuthorizedSession
 
@@ -287,9 +309,9 @@ def create_app(
                 job: Callable[[], object]
                 if stage == "sync":
                     client = drive_client_factory()
-                    folder = config.drive_folder_id or None
+                    folder_ids = _resolve_scan_roots(client, config)
                     job = lambda: run_sync(  # noqa: E731
-                        conn, client, config.cache_dir, folder
+                        conn, client, config.cache_dir, folder_ids
                     )
                 elif stage == "exact":
                     job = lambda: run_exact(conn)  # noqa: E731
@@ -406,7 +428,10 @@ def create_app(
                 f'<p class="error">could not read that folder: '
                 f"{html.escape(str(exc))}</p>"
             )
-        is_top = folder == home
+        # 'root' is only an input alias — Drive returns My Drive's real id with
+        # no parents, so detect the top of the session by parentlessness, not a
+        # string compare against 'root' (which never matches the resolved id)
+        is_top = folder == "shared" or parent is None
         return templates.TemplateResponse(
             request,
             "drive_browse.html",
@@ -463,6 +488,25 @@ def create_app(
                 "That JSON isn't a Google credential — upload a service-account "
                 "key (recommended) or a Desktop OAuth client from Cloud Console."
             ),
+            status_code=303,
+        )
+
+    @app.post("/setup/disconnect")
+    def disconnect_drive(request: Request):
+        """Remove the active Drive credential so the user can switch modes or
+        reconnect — otherwise a service-account key silently and permanently
+        shadows an OAuth connection with no way back from the UI."""
+        from urllib.parse import quote
+
+        mode = auth_mode()
+        if mode == "service_account":
+            Path(SERVICE_ACCOUNT_PATH).unlink(missing_ok=True)
+        elif mode == "oauth":
+            Path("token.json").unlink(missing_ok=True)
+        with init_lock:
+            app.state.fetcher = None  # drop the client built from old creds
+        return RedirectResponse(
+            "/setup?msg=" + quote("Disconnected from Google Drive."),
             status_code=303,
         )
 
