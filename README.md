@@ -6,7 +6,12 @@ review — with optional local-VLM adjudication and brand tagging via Ollama.
 Nothing in Drive is ever modified (read-only scope); the output is a review
 UI and an exported CSV of photos you marked for deletion.
 
+**Landing page:** https://holyscotsman.github.io/Doppel/ &nbsp;·&nbsp;
 Full specification: [SPEC.md](SPEC.md).
+
+> doppel runs on your own machine — it needs your local Ollama, your compute,
+> and your files. The site above is a front door; you connect Drive and Ollama
+> in the local `/setup` wizard after `make run`, not on the web page.
 
 ## Quickstart
 
