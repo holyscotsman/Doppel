@@ -89,9 +89,14 @@ def _similar_pairs(
     conn: sqlite3.Connection,
     vectors: dict[int, np.ndarray],
     config: Config,
-) -> list[tuple[int, int]]:
-    """kNN per photo via sqlite-vec; keep pairs at cosine >= the threshold."""
-    pairs: list[tuple[int, int]] = []
+) -> set[tuple[int, int]]:
+    """kNN per photo via sqlite-vec; keep pairs at cosine >= the threshold.
+
+    kNN is asymmetric under the k cap: when A sits in a dense burst, B can
+    be crowded out of A's top-k while A is still in B's. Pairs are kept
+    from whichever direction finds them, normalized to (low, high) id.
+    """
+    pairs: set[tuple[int, int]] = set()
     for photo_id, vector in vectors.items():
         neighbors = conn.execute(
             "SELECT photo_id, distance FROM embeddings "
@@ -101,10 +106,10 @@ def _similar_pairs(
         for row in neighbors:
             other = row["photo_id"]
             cosine = 1.0 - row["distance"]
-            if other <= photo_id or other not in vectors:
-                continue  # self, duplicate direction, or inactive photo
+            if other == photo_id or other not in vectors:
+                continue  # self or inactive photo
             if cosine >= config.similar_cosine_min:
-                pairs.append((photo_id, other))
+                pairs.add((min(photo_id, other), max(photo_id, other)))
     return pairs
 
 
@@ -121,6 +126,23 @@ def _existing_group_member_sets(conn: sqlite3.Connection) -> list[set[int]]:
     return list(sets.values())
 
 
+def _ensure_embedding_space(conn: sqlite3.Connection, config: Config) -> None:
+    """Vectors from different CLIP models live in unrelated spaces; mixing
+    them makes cosine meaningless. On a model change, wipe stored vectors so
+    everything re-embeds under the new model."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'clip_model'").fetchone()
+    if row is not None and row["value"] == config.clip_model:
+        return
+    if row is not None:
+        conn.execute("DELETE FROM embeddings")
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('clip_model', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (config.clip_model,),
+    )
+    conn.commit()
+
+
 def run_similar(
     conn: sqlite3.Connection,
     fetcher: ImageFetcher,
@@ -131,6 +153,7 @@ def run_similar(
     scan_id = start_scan(conn, "similar")
     try:
         ensure_vec_schema(conn)
+        _ensure_embedding_space(conn, config)
         n_embedded = _embed_missing(conn, fetcher, embedder, config, scan_id)
 
         vectors = load_vectors(conn)

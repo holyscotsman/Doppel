@@ -30,7 +30,6 @@ from doppel.stages.grouping import UnionFind
 # coarse bins tolerate JPEG chroma noise; the decision threshold
 # (color_variant_min_delta) lives in config.toml
 H_BINS = 12
-S_BINS = 4
 HIST_SAMPLE_SIZE = 64
 
 
@@ -48,12 +47,22 @@ def compute_hashes(img: Image.Image) -> tuple[str, str]:
 
 
 def hs_histogram(path: Path) -> np.ndarray:
-    """Normalized 2D hue/saturation histogram of an image file."""
+    """Normalized saturation-weighted hue histogram of an image file.
+
+    Weighting hue mass by saturation makes the metric invariant to global
+    saturation/contrast edits (weights rescale uniformly, then normalize
+    away) while a recolor moves hue mass wholesale — empirically a contrast
+    boost scores ~0.01 and an R/B channel swap ~0.62. Known limitation of
+    any global histogram: a colorway confined to a small fraction of the
+    frame moves at most that fraction of mass and cannot trip the flag;
+    those pairs still reach Phase 6 via the cosine adjudication band.
+    """
     with Image.open(path) as img:
         hsv = img.convert("HSV").resize((HIST_SAMPLE_SIZE, HIST_SAMPLE_SIZE))
-        arr = np.asarray(hsv).astype(int)
-    idx = (arr[:, :, 0] * H_BINS // 256) * S_BINS + (arr[:, :, 1] * S_BINS // 256)
-    hist = np.bincount(idx.ravel(), minlength=H_BINS * S_BINS).astype(float)
+        arr = np.asarray(hsv).astype(float)
+    hue_bin = (arr[:, :, 0].astype(int) * H_BINS // 256).ravel()
+    saturation = arr[:, :, 1].ravel()
+    hist = np.bincount(hue_bin, weights=saturation, minlength=H_BINS)
     return hist / (hist.sum() or 1.0)
 
 
@@ -123,14 +132,10 @@ def _confirmed(a: sqlite3.Row, b: sqlite3.Row, config: Config) -> bool:
     return hamming_hex(a["dhash"], b["dhash"]) <= config.dhash_confirm_max
 
 
-def _flag_color_variants(
-    conn: sqlite3.Connection,
-    fetcher: ImageFetcher,
-    config: Config,
-    group_id: int,
-    drive_ids: list[str],
-) -> None:
-    """Badge groups whose members share structure but differ in color."""
+def _is_color_variant(
+    fetcher: ImageFetcher, config: Config, drive_ids: list[str]
+) -> bool:
+    """Do the group's members share structure but differ in color?"""
     hists = [
         hs_histogram(fetcher.get(drive_id, config.thumb_size)) for drive_id in drive_ids
     ]
@@ -138,8 +143,7 @@ def _flag_color_variants(
         (histogram_distance(a, b) for a, b in combinations(hists, 2)),
         default=0.0,
     )
-    if delta > config.color_variant_min_delta:
-        conn.execute("UPDATE groups SET color_variant = 1 WHERE id = ?", (group_id,))
+    return delta > config.color_variant_min_delta
 
 
 def run_near(conn: sqlite3.Connection, fetcher: ImageFetcher, config: Config) -> int:
@@ -161,12 +165,26 @@ def run_near(conn: sqlite3.Connection, fetcher: ImageFetcher, config: Config) ->
             if _confirmed(a, b, config):
                 uf.union(a["id"], b["id"])
 
+        # compute colorway flags BEFORE opening the rebuild transaction:
+        # fetcher.get() records thumb_path on a second DB connection, which
+        # would deadlock against this connection's open write transaction
+        clusters = uf.clusters()
+        variant_flags = [
+            _is_color_variant(
+                fetcher,
+                config,
+                [by_id[photo_id]["drive_id"] for photo_id in cluster],
+            )
+            for cluster in clusters
+        ]
+
         rebuild_groups(conn, "near")
-        for cluster in uf.clusters():
+        for cluster, is_variant in zip(clusters, variant_flags, strict=True):
             anchor = by_id[cluster[0]]
             cur = conn.execute(
-                "INSERT INTO groups (tier, created_at) VALUES ('near', ?)",
-                (now(),),
+                "INSERT INTO groups (tier, color_variant, created_at) "
+                "VALUES ('near', ?, ?)",
+                (1 if is_variant else 0, now()),
             )
             group_id = int(cur.lastrowid)
             for photo_id in cluster:
@@ -179,13 +197,6 @@ def run_near(conn: sqlite3.Connection, fetcher: ImageFetcher, config: Config) ->
                         hamming_hex(by_id[photo_id]["phash"], anchor["phash"]),
                     ),
                 )
-            _flag_color_variants(
-                conn,
-                fetcher,
-                config,
-                group_id,
-                [by_id[photo_id]["drive_id"] for photo_id in cluster],
-            )
         conn.commit()
         finish_scan(conn, scan_id, total=n_hashed)
     except BaseException as exc:

@@ -29,7 +29,14 @@ from doppel.drive import (
     get_credentials,
 )
 from doppel.embed import ClipEmbedder, Embedder
-from doppel.jobs import JobRunner, fail_scan, now, run_sync, start_scan
+from doppel.jobs import (
+    JobRunner,
+    fail_scan,
+    now,
+    reconcile_orphaned_scans,
+    run_sync,
+    start_scan,
+)
 from doppel.stages.adjudicate import run_adjudicate
 from doppel.stages.brand import correct_brand, run_brand
 from doppel.stages.exact import run_exact
@@ -85,6 +92,14 @@ def create_app(
         "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
     )
 
+    # a killed process leaves 'running' scans rows behind; at startup no job
+    # can actually be running, so repair the ledger once
+    startup_conn = connect(config.db_path)
+    try:
+        reconcile_orphaned_scans(startup_conn)
+    finally:
+        startup_conn.close()
+
     def get_conn() -> Iterator[sqlite3.Connection]:
         conn = connect(config.db_path)
         try:
@@ -137,29 +152,40 @@ def create_app(
     def run_stage_job(stage: str) -> None:
         conn = connect(config.db_path)
         try:
-            if stage == "sync":
-                try:
-                    # never run the interactive OAuth flow on the worker
-                    # thread — it would block the runner forever if the
-                    # consent tab is missed
+            # acquire stage dependencies first; a failure here (e.g. missing
+            # OAuth credentials) happens before the stage's own start_scan,
+            # so record it in the ledger — otherwise the click would look
+            # like a silent no-op in the UI. The interactive OAuth flow is
+            # never run on this worker thread: it would block the runner
+            # forever if the consent tab is missed.
+            try:
+                job: Callable[[], object]
+                if stage == "sync":
                     creds = get_credentials(allow_interactive=False)
-                except Exception as exc:
-                    # record the failure so the UI can show it; without a
-                    # scans row the click would look like a silent no-op
-                    scan_id = start_scan(conn, "sync")
-                    fail_scan(conn, scan_id, f"{type(exc).__name__}: {exc}")
+                    client = GoogleDriveClient(creds)
+                    job = lambda: run_sync(conn, client, config.cache_dir)  # noqa: E731
+                elif stage == "exact":
+                    job = lambda: run_exact(conn)  # noqa: E731
+                elif stage == "near":
+                    fetcher = get_fetcher()
+                    job = lambda: run_near(conn, fetcher, config)  # noqa: E731
+                elif stage == "similar":
+                    fetcher, embedder = get_fetcher(), get_embedder()
+                    job = lambda: run_similar(conn, fetcher, embedder, config)  # noqa: E731
+                elif stage == "adjudicate":
+                    fetcher, vlm = get_fetcher(), get_vlm()
+                    job = lambda: run_adjudicate(conn, fetcher, vlm, config)  # noqa: E731
+                elif stage == "brand":
+                    fetcher, vlm = get_fetcher(), get_vlm()
+                    job = lambda: run_brand(conn, fetcher, vlm, config)  # noqa: E731
+                else:
                     return
-                run_sync(conn, GoogleDriveClient(creds))
-            elif stage == "exact":
-                run_exact(conn)
-            elif stage == "near":
-                run_near(conn, get_fetcher(), config)
-            elif stage == "similar":
-                run_similar(conn, get_fetcher(), get_embedder(), config)
-            elif stage == "adjudicate":
-                run_adjudicate(conn, get_fetcher(), get_vlm(), config)
-            elif stage == "brand":
-                run_brand(conn, get_fetcher(), get_vlm(), config)
+            except Exception as exc:
+                scan_id = start_scan(conn, stage)
+                detail = exc.detail if isinstance(exc, HTTPException) else exc
+                fail_scan(conn, scan_id, f"{type(exc).__name__}: {detail}")
+                return
+            job()
         finally:
             conn.close()
 
@@ -388,7 +414,10 @@ def create_app(
                 raise HTTPException(
                     status_code=422, detail=f"invalid action {action!r}"
                 )
-            photo_id = int(key.removeprefix("action_"))
+            try:
+                photo_id = int(key.removeprefix("action_"))
+            except ValueError:
+                continue  # malformed field name: ignore like foreign fields
             if photo_id not in member_ids:
                 continue  # stale or foreign field: ignore
             conn.execute(
@@ -487,14 +516,16 @@ def create_app(
         if not value:
             raise HTTPException(status_code=422, detail="brand value required")
         correct_brand(conn, photo_id, value)
-        back = "/brands/photos"
-        query = []
+        from urllib.parse import urlencode
+
+        params: dict[str, str] = {}
         if form.get("brand"):
-            query.append(f"brand={form['brand']}")
+            params["brand"] = str(form["brand"])
         if form.get("queue"):
-            query.append("queue=1")
-        if query:
-            back += "?" + "&".join(query)
+            params["queue"] = "1"
+        back = "/brands/photos"
+        if params:
+            back += "?" + urlencode(params)
         return RedirectResponse(url=back, status_code=303)
 
     @app.get("/export")

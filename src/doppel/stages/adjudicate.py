@@ -41,7 +41,13 @@ GROUPING_VERDICTS = ("same", "near", "variant")
 
 
 def _band_pairs(conn: sqlite3.Connection, config: Config) -> set[tuple[int, int]]:
-    """Similar pairs in the adjudication band, from stored vectors."""
+    """Similar pairs in the adjudication band, from stored vectors.
+
+    Band pairs are farther than auto-group pairs, so they are the first
+    crowded out of a photo's top-k by any burst of closer shots — keep
+    pairs from whichever direction's kNN finds them (normalized ordering),
+    never assume symmetry.
+    """
     ensure_vec_schema(conn)
     vectors = load_vectors(conn)
     pairs: set[tuple[int, int]] = set()
@@ -54,10 +60,10 @@ def _band_pairs(conn: sqlite3.Connection, config: Config) -> set[tuple[int, int]
         for row in neighbors:
             other = row["photo_id"]
             cosine = 1.0 - row["distance"]
-            if other <= photo_id or other not in vectors:
+            if other == photo_id or other not in vectors:
                 continue
             if config.ollama.adjudicate_band_min <= cosine < config.similar_cosine_min:
-                pairs.add((photo_id, other))
+                pairs.add((min(photo_id, other), max(photo_id, other)))
     return pairs
 
 

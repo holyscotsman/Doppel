@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS scans (
   error       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tags (
   photo_id   INTEGER NOT NULL REFERENCES photos(id),
   kind       TEXT NOT NULL,            -- 'brand'

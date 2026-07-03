@@ -8,6 +8,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from doppel.drive import DriveClient
@@ -54,6 +55,18 @@ def fail_scan(conn: sqlite3.Connection, scan_id: int, error: str) -> None:
     conn.commit()
 
 
+def reconcile_orphaned_scans(conn: sqlite3.Connection) -> None:
+    """Mark every 'running' scans row failed. Call at process startup, when
+    no job can actually be running — a killed process leaves its row behind
+    and the dashboard would report a phantom in-progress scan forever."""
+    conn.execute(
+        "UPDATE scans SET status = 'failed', error = 'interrupted', "
+        "finished_at = ? WHERE status = 'running'",
+        (now(),),
+    )
+    conn.commit()
+
+
 def _upsert_photo(conn: sqlite3.Connection, file: dict[str, Any]) -> None:
     meta = file.get("imageMediaMetadata") or {}
     size = file.get("size")
@@ -89,11 +102,40 @@ def _upsert_photo(conn: sqlite3.Connection, file: dict[str, Any]) -> None:
     )
 
 
-def run_sync(conn: sqlite3.Connection, client: DriveClient) -> int:
+def _invalidate_derived(
+    conn: sqlite3.Connection, drive_id: str, cache_dir: Path | str | None
+) -> None:
+    """A file was edited in place (same drive_id, new md5): every derived
+    artifact describes the OLD pixels. Drop hashes, embedding, and cached
+    thumbnails so the next stage runs recompute them."""
+    conn.execute(
+        "UPDATE photos SET phash = NULL, dhash = NULL, thumb_path = NULL "
+        "WHERE drive_id = ?",
+        (drive_id,),
+    )
+    row = conn.execute(
+        "SELECT id FROM photos WHERE drive_id = ?", (drive_id,)
+    ).fetchone()
+    if row is not None:
+        from doppel.db import ensure_vec_schema
+
+        ensure_vec_schema(conn)
+        conn.execute("DELETE FROM embeddings WHERE photo_id = ?", (row["id"],))
+    if cache_dir is not None:
+        for stale in Path(cache_dir).glob(f"{drive_id}_*"):
+            stale.unlink(missing_ok=True)
+
+
+def run_sync(
+    conn: sqlite3.Connection,
+    client: DriveClient,
+    cache_dir: Path | str | None = None,
+) -> int:
     """Full inventory sync: upsert every Drive image, mark unseen rows missing.
 
     Returns the scans row id. Idempotent: a re-run with an unchanged Drive
-    account changes nothing.
+    account changes nothing. When a file's content changed in place (same
+    drive_id, different md5), its derived state is invalidated.
     """
     scan_id = start_scan(conn, "sync")
     try:
@@ -104,7 +146,12 @@ def run_sync(conn: sqlite3.Connection, client: DriveClient) -> int:
         while True:
             page = client.list_images_page(page_token)
             for file in page.get("files", []):
+                old = conn.execute(
+                    "SELECT md5 FROM photos WHERE drive_id = ?", (file["id"],)
+                ).fetchone()
                 _upsert_photo(conn, file)
+                if old is not None and old["md5"] != file.get("md5Checksum"):
+                    _invalidate_derived(conn, file["id"], cache_dir)
                 conn.execute(
                     "INSERT OR IGNORE INTO seen (drive_id) VALUES (?)", (file["id"],)
                 )
