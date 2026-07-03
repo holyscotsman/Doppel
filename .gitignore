@@ -1,6 +1,7 @@
 # credentials and tokens — never commit
 credentials.json
 token.json
+service_account.json
 
 # local data
 cache/

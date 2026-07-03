@@ -96,8 +96,49 @@ def web_auth_flow(credentials_path: Path | str, redirect_uri: str) -> Any:
     )
 
 
+SERVICE_ACCOUNT_PATH = "service_account.json"
+
+
 class CredentialsRequired(RuntimeError):
     """Interactive OAuth is needed but the caller cannot run it."""
+
+
+def load_service_account_credentials(
+    path: Path | str = SERVICE_ACCOUNT_PATH,
+) -> Any:
+    """Build read-only Drive credentials from a service-account key file.
+
+    No OAuth flow, consent screen, or token expiry — the app authenticates
+    as the service account, which sees only the folders a user has shared
+    with its email. Never log or print the key contents.
+    """
+    from google.oauth2 import service_account
+
+    return service_account.Credentials.from_service_account_file(
+        str(path), scopes=SCOPES
+    )
+
+
+def service_account_email(path: Path | str = SERVICE_ACCOUNT_PATH) -> str | None:
+    """The client_email from a service-account key file — this is what the
+    user shares their Drive folder with. Returns None if unreadable."""
+    import json
+
+    try:
+        return json.loads(Path(path).read_text()).get("client_email")
+    except (OSError, ValueError):
+        return None
+
+
+def is_service_account_key(data: bytes) -> bool:
+    """True if the uploaded JSON is a service-account key (not an OAuth client)."""
+    import json
+
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        return False
+    return parsed.get("type") == "service_account" and "client_email" in parsed
 
 
 def get_credentials(
@@ -225,6 +266,34 @@ class GoogleDriveClient:
         page_token: str | None = None
         while True:
             page = self.list_folders_page(parent_id, page_token)
+            folders.extend(page.get("files", []))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+        return folders
+
+    def list_shared_folders(self) -> list[dict[str, Any]]:
+        """Folders shared with this account — the entry point in service-account
+        mode, where the account's own My Drive is empty and the user grants
+        access by sharing folders with the service-account email."""
+        query = (
+            f"sharedWithMe = true and mimeType = '{FOLDER_MIME}' and trashed = false"
+        )
+        folders: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            page = (
+                self._service.files()
+                .list(
+                    q=query,
+                    pageSize=PAGE_SIZE,
+                    fields="nextPageToken, files(id, name)",
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
             folders.extend(page.get("files", []))
             page_token = page.get("nextPageToken")
             if not page_token:

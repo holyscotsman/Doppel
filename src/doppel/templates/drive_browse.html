@@ -1,37 +1,44 @@
 <div class="browser">
   <div class="crumbs">
-    {% if is_root %}
-      <strong>🏠 My Drive</strong>
+    {% if is_top %}
+      <strong>{% if home == 'shared' %}📂 {{ current.name }}{% else %}🏠 My Drive{% endif %}</strong>
     {% else %}
-      <a class="crumb" hx-get="/drive/browse?folder=root" hx-target="#drive-browser">🏠 My Drive</a>
-      {% if parent %}
+      <a class="crumb" hx-get="/drive/browse?folder={{ home }}&home={{ home }}" hx-target="#drive-browser">
+        {% if home == 'shared' %}📂 Shared folders{% else %}🏠 My Drive{% endif %}
+      </a>
+      {% if show_up %}
       <span class="sep">/</span>
-      <a class="crumb" hx-get="/drive/browse?folder={{ parent }}" hx-target="#drive-browser">⬆ up</a>
+      <a class="crumb" hx-get="/drive/browse?folder={{ parent }}&home={{ home }}" hx-target="#drive-browser">⬆ up</a>
       {% endif %}
       <span class="sep">/</span>
       <strong>{{ current.name }}</strong>
     {% endif %}
   </div>
 
+  {% if not (home == 'shared' and is_top) %}
   <form method="post" action="/setup/folder" class="decision scan-here">
-    <input type="hidden" name="folder" value="{{ '' if is_root else current.id }}">
+    <input type="hidden" name="folder" value="{{ '' if can_scan_all else current.id }}">
     <button type="submit">
-      {% if is_root %}Scan entire Drive{% else %}Scan “{{ current.name }}”{% endif %}
+      {% if can_scan_all %}Scan entire Drive{% else %}Scan “{{ current.name }}”{% endif %}
     </button>
-    {% if (is_root and not saved_folder) or (not is_root and saved_folder == current.id) %}
+    {% if (can_scan_all and not saved_folder) or (not can_scan_all and saved_folder == current.id) %}
     <span class="badge badge-ok">current scope</span>
     {% endif %}
   </form>
+  {% endif %}
 
   <ul class="folders">
     {% for f in subfolders %}
     <li>
-      <a class="folder" hx-get="/drive/browse?folder={{ f.id }}" hx-target="#drive-browser">
+      <a class="folder" hx-get="/drive/browse?folder={{ f.id }}&home={{ home }}" hx-target="#drive-browser">
         📁 {{ f.name }}
       </a>
     </li>
     {% else %}
-    <li class="muted">no subfolders here</li>
+    <li class="muted">
+      {% if home == 'shared' %}Nothing shared with doppel yet — share a folder with the
+      address in step 1, then reload.{% else %}no subfolders here{% endif %}
+    </li>
     {% endfor %}
   </ul>
 </div>

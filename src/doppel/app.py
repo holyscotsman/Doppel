@@ -22,12 +22,16 @@ from fastapi.templating import Jinja2Templates
 from doppel.config import Config, load_config, set_config_value
 from doppel.db import connect
 from doppel.drive import (
+    SERVICE_ACCOUNT_PATH,
     CredentialsRequired,
     FetchError,
     GoogleDriveClient,
     ImageFetcher,
     get_credentials,
+    is_service_account_key,
+    load_service_account_credentials,
     parse_folder_input,
+    service_account_email,
     web_auth_flow,
 )
 from doppel.embed import ClipEmbedder, Embedder
@@ -54,12 +58,35 @@ UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate", "brand"]
 PAGE_SIZE = 20
 
 
+def auth_mode() -> str | None:
+    """How Drive is connected: a service-account key takes precedence over an
+    OAuth token (it's the cleaner path — no consent screen, no expiry)."""
+    if Path(SERVICE_ACCOUNT_PATH).exists():
+        return "service_account"
+    if Path("token.json").exists():
+        return "oauth"
+    return None
+
+
+def build_drive_credentials() -> object:
+    """Credentials for the current auth mode. Raises CredentialsRequired when
+    Drive isn't connected yet."""
+    mode = auth_mode()
+    if mode == "service_account":
+        return load_service_account_credentials()
+    if mode == "oauth":
+        return get_credentials(allow_interactive=False)
+    raise CredentialsRequired(
+        "Google Drive is not connected yet — finish step 1 of the setup wizard."
+    )
+
+
 def _build_real_fetcher(config: Config) -> ImageFetcher:
     from google.auth.transport.requests import AuthorizedSession
 
     from doppel.drive import DriveImageFetcher
 
-    creds = get_credentials(allow_interactive=False)
+    creds = build_drive_credentials()
     return DriveImageFetcher(
         db_path=config.db_path,
         client=GoogleDriveClient(creds),
@@ -145,7 +172,7 @@ def create_app(
     )
     ollama_lister = ollama_lister or _list_ollama_models
     drive_client_factory = drive_client_factory or (
-        lambda: GoogleDriveClient(get_credentials(allow_interactive=False))
+        lambda: GoogleDriveClient(build_drive_credentials())
     )
 
     app = FastAPI(title="doppel")
@@ -326,14 +353,20 @@ def create_app(
                     "message": f"Test failed — could not reach Ollama at {host}.",
                     "detail": str(exc),
                 }
+        mode = auth_mode()
         return templates.TemplateResponse(
             request,
             "setup.html",
             {
                 "msg": msg,
                 "err": err,
+                "auth_mode": mode,
+                "authorized": mode is not None,
                 "credentials_present": Path("credentials.json").exists(),
-                "authorized": Path("token.json").exists(),
+                "sa_email": service_account_email()
+                if mode == "service_account"
+                else None,
+                "browse_root": "shared" if mode == "service_account" else "root",
                 "host": host,
                 "saved_host": config.ollama.host,
                 "saved_model": config.ollama.model,
@@ -345,9 +378,13 @@ def create_app(
         )
 
     @app.get("/drive/browse", response_class=HTMLResponse)
-    def drive_browse(request: Request, folder: str = "root"):
+    def drive_browse(request: Request, folder: str = "root", home: str = "root"):
         """Folder-picker partial: subfolders of `folder`, with breadcrumb and
-        a scan-this-folder button. Drives the setup wizard's scope step."""
+        a scan-this-folder button. Drives the setup wizard's scope step.
+
+        `home` is the top of this browse session — 'root' (My Drive) for OAuth,
+        'shared' (folders shared with the service account) for service-account
+        mode, where the account's own My Drive is empty."""
         try:
             client = drive_client_factory()
         except CredentialsRequired:
@@ -355,21 +392,33 @@ def create_app(
                 '<p class="muted">Connect Google Drive first (step 1).</p>'
             )
         try:
-            meta = client.get_folder(folder)
-            subfolders = client.list_child_folders(folder)
+            if folder == "shared":
+                meta = {"id": "shared", "name": "Folders shared with doppel"}
+                subfolders = client.list_shared_folders()
+                parent = None
+            else:
+                meta = client.get_folder(folder)
+                subfolders = client.list_child_folders(folder)
+                parents = meta.get("parents") or []
+                parent = parents[0] if parents else None
         except Exception as exc:
             return HTMLResponse(
                 f'<p class="error">could not read that folder: '
                 f"{html.escape(str(exc))}</p>"
             )
-        parents = meta.get("parents") or []
+        is_top = folder == home
         return templates.TemplateResponse(
             request,
             "drive_browse.html",
             {
                 "current": meta,
-                "parent": parents[0] if parents else None,
-                "is_root": not parents,  # My Drive has no parent
+                "home": home,
+                "is_top": is_top,
+                # 'up' only makes sense in My-Drive mode (a shared folder's
+                # real parent usually isn't accessible to the service account)
+                "show_up": home == "root" and not is_top and parent is not None,
+                "parent": parent,
+                "can_scan_all": home == "root" and is_top,  # "entire Drive"
                 "subfolders": sorted(subfolders, key=lambda f: f["name"].lower()),
                 "saved_folder": config.drive_folder_id,
             },
@@ -378,25 +427,43 @@ def create_app(
     @app.post("/setup/credentials")
     async def upload_credentials(request: Request):
         import json as _json
+        from urllib.parse import quote
 
         form = await request.form()
         upload = form.get("credentials")
         if upload is None or not hasattr(upload, "read"):
             return RedirectResponse("/setup?err=no+file+uploaded", status_code=303)
         data = await upload.read()
+        # a service-account key is the recommended, cleaner path — accept it
+        # and route it to service_account.json
+        if is_service_account_key(data):
+            Path(SERVICE_ACCOUNT_PATH).write_bytes(data)
+            email = service_account_email() or ""
+            return RedirectResponse(
+                "/setup?msg="
+                + quote(
+                    "Service account connected. Now share your photos folder in "
+                    f"Google Drive with: {email}"
+                ),
+                status_code=303,
+            )
         try:
             parsed = _json.loads(data)
         except ValueError:
             parsed = {}
-        if "installed" not in parsed and "web" not in parsed:
+        if "installed" in parsed or "web" in parsed:
+            Path("credentials.json").write_bytes(data)
             return RedirectResponse(
-                "/setup?err=that+file+is+not+an+OAuth+client+JSON+"
-                "(expected+a+Desktop-app+client+from+Google+Cloud+Console)",
+                "/setup?msg=" + quote("OAuth client saved — now sign in"),
                 status_code=303,
             )
-        Path("credentials.json").write_bytes(data)
         return RedirectResponse(
-            "/setup?msg=credentials+saved+—+now+authorize", status_code=303
+            "/setup?err="
+            + quote(
+                "That JSON isn't a Google credential — upload a service-account "
+                "key (recommended) or a Desktop OAuth client from Cloud Console."
+            ),
+            status_code=303,
         )
 
     @app.post("/oauth/start")
@@ -535,7 +602,7 @@ def create_app(
                 "tier_counts": tier_counts,
                 "trash_count": trash_count,
                 "scans": scan_overview(conn),
-                "needs_setup": not Path("token.json").exists(),
+                "needs_setup": auth_mode() is None,
                 "folder_id": config.drive_folder_id,
             },
         )
@@ -553,7 +620,7 @@ def create_app(
         error = None
         if stage not in UI_STAGES:
             raise HTTPException(status_code=404, detail=f"unknown stage {stage!r}")
-        if stage == "sync" and not Path("token.json").exists():
+        if stage == "sync" and auth_mode() is None:
             error = "Google Drive is not connected yet — open the setup wizard."
         elif not app.state.runner.start(stage, lambda: run_stage_job(stage)):
             error = "a job is already running"

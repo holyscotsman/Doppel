@@ -72,11 +72,22 @@ BROWSE_TREE = {
 }
 
 
+SA_KEY = json.dumps(
+    {
+        "type": "service_account",
+        "client_email": "doppel@proj.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+)
+
+
 class FakeBrowseClient:
     """Fake Drive client supporting folder navigation for the picker."""
 
-    def __init__(self, tree: dict) -> None:
+    def __init__(self, tree: dict, shared: list[str] | None = None) -> None:
         self.tree = tree
+        self.shared = shared or []  # folder ids shared with the service account
 
     def get_folder(self, folder_id: str) -> dict:
         if folder_id not in self.tree:
@@ -90,6 +101,9 @@ class FakeBrowseClient:
     def list_child_folders(self, folder_id: str) -> list[dict]:
         _, _, children = self.tree[folder_id]
         return [{"id": c, "name": self.tree[c][0]} for c in children]
+
+    def list_shared_folders(self) -> list[dict]:
+        return [{"id": c, "name": self.tree[c][0]} for c in self.shared]
 
 
 @pytest.fixture
@@ -518,11 +532,11 @@ def test_setup_shows_browser_only_when_authorized(wizard, tmp_path):
 
     (tmp_path / "token.json").write_text("{}")
     page = wizard.get("/setup")
-    assert 'hx-get="/drive/browse?folder=root"' in page.text
+    assert "/drive/browse?folder=root" in page.text  # OAuth entry = My Drive
 
 
 def test_drive_browse_lists_my_drive(wizard):
-    page = wizard.get("/drive/browse", params={"folder": "root"})
+    page = wizard.get("/drive/browse", params={"folder": "root", "home": "root"})
     assert page.status_code == 200
     assert "My Drive" in page.text
     assert "Photos" in page.text and "Docs" in page.text  # top-level folders
@@ -530,12 +544,14 @@ def test_drive_browse_lists_my_drive(wizard):
 
 
 def test_drive_browse_drills_in_with_breadcrumb(wizard):
-    page = wizard.get("/drive/browse", params={"folder": "photos_folder"})
+    page = wizard.get(
+        "/drive/browse", params={"folder": "photos_folder", "home": "root"}
+    )
     assert "Photos" in page.text
     assert "2024" in page.text  # subfolder shown
     assert "up" in page.text  # up-nav present
     assert "Scan “Photos”" in page.text
-    assert 'hx-get="/drive/browse?folder=y2024_folder"' in page.text
+    assert "/drive/browse?folder=y2024_folder" in page.text
 
 
 def test_drive_browse_requires_auth():
@@ -636,3 +652,99 @@ def test_no_models_shows_pull_hint_not_install(tmp_path, monkeypatch):
         page = client.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
         assert "ollama pull gemma3" in page.text
         assert "Get Ollama running" not in page.text  # it IS running
+
+
+# --- Service-account auth (the recommended, no-consent-screen path) ---
+
+
+def test_upload_service_account_key_connects(wizard, tmp_path):
+    resp = wizard.post(
+        "/setup/credentials",
+        files={"credentials": ("sa.json", SA_KEY.encode(), "application/json")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "msg=" in resp.headers["location"]
+    # routed to service_account.json, NOT credentials.json
+    assert (tmp_path / "service_account.json").exists()
+    assert not (tmp_path / "credentials.json").exists()
+    # the redirect tells the user which email to share their folder with
+    assert "gserviceaccount.com" in resp.headers["location"]
+
+
+def test_service_account_mode_setup_page(wizard, tmp_path):
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    page = wizard.get("/setup")
+    assert "connected (service account)" in page.text
+    assert "doppel@proj.iam.gserviceaccount.com" in page.text  # share-with email
+    assert "Share" in page.text
+    # scope browser starts from shared-with-me, not My Drive
+    assert "/drive/browse?folder=shared" in page.text
+
+
+def test_auth_mode_prefers_service_account(wizard, tmp_path):
+    from doppel.app import auth_mode
+
+    (tmp_path / "token.json").write_text("{}")
+    assert auth_mode() == "oauth"
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    assert auth_mode() == "service_account"  # SA takes precedence
+
+
+def test_browse_shared_lists_shared_folders(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: FakeBrowseClient(
+            BROWSE_TREE, shared=["photos_folder"]
+        ),
+    )
+    with TestClient(app) as client:
+        page = client.get(
+            "/drive/browse", params={"folder": "shared", "home": "shared"}
+        )
+        assert "Photos" in page.text  # the shared folder
+        assert "Scan entire Drive" not in page.text  # no "everything" in SA mode
+        # drilling into the shared folder is offered
+        assert "/drive/browse?folder=photos_folder" in page.text
+
+
+def test_service_account_sync_via_ui(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache").replace(
+            'drive_folder_id = ""', 'drive_folder_id = "photos_folder"'
+        )
+    )
+    (tmp_path / "service_account.json").write_text(SA_KEY)
+    files = [
+        make_file("p1", md5="a", parent="photos_folder"),
+        make_file("p2", md5="b", parent="elsewhere"),
+    ]
+
+    class SyncClient(FakeDriveClient):
+        def list_folders_page(self, parent_id, page_token=None):
+            return {"files": []}  # photos_folder has no subfolders
+
+    fake = SyncClient(files, folders={})
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        drive_client_factory=lambda: fake,
+    )
+    with TestClient(app) as client:
+        resp = client.post("/scans/sync")  # SA mode counts as connected
+        assert resp.status_code == 200
+        app.state.runner.wait(timeout=10)
+
+    conn = connect(tmp_path / "t.db")
+    rows = {r["drive_id"] for r in conn.execute("SELECT drive_id FROM photos")}
+    conn.close()
+    assert rows == {"p1"}  # only the shared folder's file was synced

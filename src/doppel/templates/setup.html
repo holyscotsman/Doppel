@@ -7,31 +7,47 @@
 
 <div class="setup-step">
   <h3>1. Google Drive
-    {% if authorized %}<span class="badge badge-ok">connected</span>
-    {% elif credentials_present %}<span class="badge">ready — sign in below</span>
+    {% if auth_mode == 'service_account' %}<span class="badge badge-ok">connected (service account)</span>
+    {% elif auth_mode == 'oauth' %}<span class="badge badge-ok">connected</span>
+    {% elif credentials_present %}<span class="badge">OAuth client ready — sign in below</span>
     {% else %}<span class="badge badge-todo">not connected</span>{% endif %}
   </h3>
-  {% if credentials_present %}
-    <form method="post" action="/oauth/start">
-      <button type="submit" class="google-btn">
-        {% if authorized %}Re-connect Google Drive{% else %}Sign in with Google{% endif %}
-      </button>
+
+  {% if auth_mode == 'service_account' %}
+    <div class="note">
+      <strong>One step left — share your photos with doppel.</strong>
+      In Google Drive, right-click the folder you want to scan → <strong>Share</strong>,
+      and add this address as a Viewer:
+      <div style="margin:0.5rem 0"><code>{{ sa_email }}</code></div>
+      Then pick that folder in step 3 below. No sign-in, nothing expires.
+    </div>
+    <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
+      <input type="file" name="credentials" accept=".json,application/json">
+      <button type="submit">replace key file</button>
     </form>
-    {% if authorized %}
+  {% elif auth_mode == 'oauth' %}
+    <form method="post" action="/oauth/start">
+      <button type="submit" class="google-btn">Re-connect Google Drive</button>
+    </form>
     <p class="muted">Read-only access. doppel never changes anything in your Drive.</p>
-    {% endif %}
+  {% elif credentials_present %}
+    <form method="post" action="/oauth/start">
+      <button type="submit" class="google-btn">Sign in with Google</button>
+    </form>
   {% else %}
-    <p class="muted">
-      One-time setup: doppel needs a Google “OAuth client” so it can ask for your
-      permission. Create a free one (type <strong>Desktop app</strong>) in the
-      <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google&nbsp;Cloud&nbsp;Console</a>
-      with the Drive API enabled, download the JSON, and drop it in below. After
-      this once, connecting is a single “Sign in with Google” click — for good.
-    </p>
+    <p class="muted"><strong>Recommended — service account</strong> (no sign-in flow,
+      no consent screen, never expires). In the
+      <a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Cloud&nbsp;Console</a>:
+      make a service account, add a <strong>JSON key</strong>, enable the Drive API,
+      and drop the key file in below. Then you just share your photos folder with the
+      account’s email — that’s it, for good.</p>
     <form method="post" action="/setup/credentials" enctype="multipart/form-data" class="decision">
       <input type="file" name="credentials" accept=".json,application/json" required>
-      <button type="submit">use this client file</button>
+      <button type="submit">connect with key file</button>
     </form>
+    <p class="muted" style="margin-top:0.8rem">Prefer classic sign-in? This same box
+      also accepts a Desktop <strong>OAuth client</strong> JSON — you’ll then get a
+      “Sign in with Google” button (re-consent every 7 days in test mode).</p>
   {% endif %}
 </div>
 
@@ -89,9 +105,11 @@
     {% else %}<span class="badge badge-ok">entire Drive</span>{% endif %}
   </h3>
   {% if authorized %}
-  <p class="muted">Browse your Drive and pick a folder to scan (its subfolders are
-    included), or scan everything from My&nbsp;Drive.</p>
-  <div id="drive-browser" hx-get="/drive/browse?folder=root" hx-trigger="load">
+  <p class="muted">Browse and pick a folder to scan (subfolders included){% if auth_mode == 'oauth' %},
+    or scan everything from My&nbsp;Drive{% endif %}.</p>
+  <div id="drive-browser"
+       hx-get="/drive/browse?folder={{ browse_root }}&home={{ browse_root }}"
+       hx-trigger="load">
     <p class="muted">loading your Drive…</p>
   </div>
   {% else %}
