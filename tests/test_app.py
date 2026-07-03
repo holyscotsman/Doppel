@@ -205,3 +205,48 @@ def test_sync_auth_failure_recorded_in_scans_ledger(
         "authorization required" in scan["error"].lower()
         or "CredentialsRequired" in scan["error"]
     )
+
+
+def test_adjudicate_stage_via_ui_shows_verdict(config) -> None:
+    from doppel.jobs import now as job_now
+    from tests.fakes import FakeImageFetcher, FakeVlm
+
+    conn = connect(config.db_path)
+    a = insert_photo(conn, "red", name="red.jpg", md5="r")
+    b = insert_photo(conn, "blue", name="blue.jpg", md5="bl")
+    cur = conn.execute(
+        "INSERT INTO groups (tier, color_variant, created_at) VALUES ('near', 1, ?)",
+        (job_now(),),
+    )
+    gid = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO group_members (group_id, photo_id) VALUES (?, ?)",
+        [(gid, a), (gid, b)],
+    )
+    conn.commit()
+    conn.close()
+
+    app = create_app(
+        config=config,
+        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
+        vlm_factory=lambda cfg: FakeVlm(
+            [{"verdict": "variant", "reason": "same shirt, different color"}]
+        ),
+    )
+    with TestClient(app) as ui:
+        resp = ui.post("/scans/adjudicate")
+        assert resp.status_code == 200
+        app.state.runner.wait(timeout=10)
+
+        listing = ui.get("/groups", params={"tier": "vlm"})
+        assert "2 photos" in listing.text
+        assert "color variant" in listing.text
+
+        conn = connect(config.db_path)
+        group_id = conn.execute("SELECT id FROM groups WHERE tier = 'vlm'").fetchone()[
+            "id"
+        ]
+        conn.close()
+        detail = ui.get(f"/groups/{group_id}")
+        assert "same shirt, different color" in detail.text
+        assert "variant" in detail.text

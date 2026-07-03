@@ -47,13 +47,26 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE TABLE IF NOT EXISTS scans (
   id          INTEGER PRIMARY KEY,
-  stage       TEXT NOT NULL,     -- sync | exact | near | similar
+  stage       TEXT NOT NULL,     -- sync | exact | near | similar | adjudicate
   status      TEXT NOT NULL,     -- running | done | failed
   processed   INTEGER DEFAULT 0,
   total       INTEGER,
   started_at  TEXT,
   finished_at TEXT,
   error       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS vlm_results (
+  id             INTEGER PRIMARY KEY,
+  task           TEXT NOT NULL,        -- adjudicate | brand
+  photo_id       INTEGER NOT NULL REFERENCES photos(id),
+  photo_id_b     INTEGER REFERENCES photos(id),  -- adjudicate only
+  model          TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  response       TEXT NOT NULL,        -- raw JSON from the model
+  verdict        TEXT,
+  confidence     REAL,
+  created_at     TEXT NOT NULL
 );
 """
 

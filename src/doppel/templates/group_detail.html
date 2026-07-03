@@ -6,6 +6,19 @@
   {% if group.color_variant %}<span class="badge">color variant</span>{% endif %}
 </h2>
 <p><a href="/groups?tier={{ group.tier }}">&larr; back to {{ group.tier }} groups</a></p>
+{% if verdicts %}
+<table class="verdicts">
+  <tr><th>pair</th><th>model verdict</th><th>reason</th><th class="muted">model</th></tr>
+  {% for v in verdicts %}
+  <tr>
+    <td>{{ v.a }} vs {{ v.b }}</td>
+    <td><span class="badge">{{ v.verdict }}</span></td>
+    <td>{{ v.reason }}</td>
+    <td class="muted">{{ v.model }} / {{ v.prompt_version }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
 <form method="post" action="/groups/{{ group.id }}/decisions">
 <div class="members">
   {% for p in members %}

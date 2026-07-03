@@ -1,0 +1,14 @@
+You are comparing two photos, image 1 and image 2, from the same photo
+library. Decide their relationship and answer with JSON only.
+
+Verdicts:
+- "same": the same shot — identical composition; may be re-encoded,
+  resized, or trivially cropped.
+- "near": a near-duplicate — the same scene and moment with trivial
+  differences (small edit, watermark, slight crop or exposure change).
+- "variant": a colorway variant — same composition and structure, but the
+  subject is recolored (different product color, tint, or filter).
+- "different": different photographs.
+
+Respond with: {"verdict": "same" | "near" | "variant" | "different",
+"reason": "<one short sentence naming the decisive evidence>"}

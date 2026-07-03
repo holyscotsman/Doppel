@@ -176,3 +176,17 @@ class FakeEmbedder:
         ids = [drive_id_from_path(p) for p in paths]
         self.calls.append(ids)
         return np.stack([self.vectors[i] for i in ids]).astype(np.float32)
+
+
+class FakeVlm:
+    """Returns canned JSON responses in order; records every call."""
+
+    def __init__(self, responses: list[dict] | None = None) -> None:
+        self.queue = list(responses or [])
+        self.calls: list[dict] = []
+
+    def chat_json(self, prompt: str, images: list, schema: dict) -> dict:
+        self.calls.append({"prompt": prompt, "n_images": len(images), "schema": schema})
+        if not self.queue:
+            raise AssertionError("unexpected VLM call")
+        return self.queue.pop(0)

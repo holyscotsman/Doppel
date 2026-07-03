@@ -30,14 +30,16 @@ from doppel.drive import (
 )
 from doppel.embed import ClipEmbedder, Embedder
 from doppel.jobs import JobRunner, fail_scan, now, run_sync, start_scan
+from doppel.stages.adjudicate import run_adjudicate
 from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
+from doppel.vlm import OllamaClient, VlmClient
 
 PACKAGE_DIR = Path(__file__).parent
 
 # stages the UI can launch, in pipeline order; extended phase by phase
-UI_STAGES = ["sync", "exact", "near", "similar"]
+UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
 
 PAGE_SIZE = 20
 
@@ -60,17 +62,22 @@ def create_app(
     config: Config | None = None,
     fetcher_factory: Callable[[Config], ImageFetcher] | None = None,
     embedder_factory: Callable[[Config], Embedder] | None = None,
+    vlm_factory: Callable[[Config], VlmClient] | None = None,
 ) -> FastAPI:
-    """Build the app. Tests inject a Config and fake fetcher/embedder factories."""
+    """Build the app. Tests inject a Config and fake factories."""
     config = config or load_config()
     fetcher_factory = fetcher_factory or _build_real_fetcher
     embedder_factory = embedder_factory or (lambda cfg: ClipEmbedder(cfg.clip_model))
+    vlm_factory = vlm_factory or (
+        lambda cfg: OllamaClient(cfg.ollama.host, cfg.ollama.model)
+    )
 
     app = FastAPI(title="doppel")
     app.state.config = config
     app.state.runner = JobRunner()
     app.state.fetcher = None  # built lazily: needs OAuth credentials
     app.state.embedder = None  # built lazily: loads the CLIP model
+    app.state.vlm = None  # built lazily: needs the Ollama server
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     app.mount(
@@ -101,6 +108,12 @@ def create_app(
             if app.state.embedder is None:
                 app.state.embedder = embedder_factory(config)
             return app.state.embedder
+
+    def get_vlm() -> VlmClient:
+        with init_lock:
+            if app.state.vlm is None:
+                app.state.vlm = vlm_factory(config)
+            return app.state.vlm
 
     def scan_overview(conn: sqlite3.Connection) -> list[dict]:
         """Latest scans row per UI stage, plus whether it is the live job."""
@@ -142,6 +155,8 @@ def create_app(
                 run_near(conn, get_fetcher(), config)
             elif stage == "similar":
                 run_similar(conn, get_fetcher(), get_embedder(), config)
+            elif stage == "adjudicate":
+                run_adjudicate(conn, get_fetcher(), get_vlm(), config)
         finally:
             conn.close()
 
@@ -300,10 +315,51 @@ def create_app(
             p["id"]: decisions.get(p["id"], "keep" if i == 0 else "trash")
             for i, p in enumerate(members)
         }
+        verdicts = []
+        if group["tier"] == "vlm" and members:
+            import json as _json
+
+            names = {p["id"]: p["name"] for p in members}
+            ids = list(names)
+            placeholders = ",".join("?" * len(ids))
+            seen_pairs: set[tuple[int, int]] = set()
+            for row in conn.execute(
+                f"""
+                SELECT * FROM vlm_results
+                WHERE task = 'adjudicate'
+                  AND photo_id IN ({placeholders})
+                  AND photo_id_b IN ({placeholders})
+                ORDER BY id DESC
+                """,  # noqa: S608 — placeholders only
+                (*ids, *ids),
+            ):
+                pair = (row["photo_id"], row["photo_id_b"])
+                if pair in seen_pairs:
+                    continue  # newest ruling per pair wins
+                seen_pairs.add(pair)
+                try:
+                    reason = _json.loads(row["response"]).get("reason", "")
+                except ValueError:
+                    reason = ""
+                verdicts.append(
+                    {
+                        "a": names[row["photo_id"]],
+                        "b": names[row["photo_id_b"]],
+                        "verdict": row["verdict"],
+                        "reason": reason,
+                        "model": row["model"],
+                        "prompt_version": row["prompt_version"],
+                    }
+                )
         return templates.TemplateResponse(
             request,
             "group_detail.html",
-            {"group": group, "members": members, "selected": selected},
+            {
+                "group": group,
+                "members": members,
+                "selected": selected,
+                "verdicts": verdicts,
+            },
         )
 
     @app.post("/groups/{group_id}/decisions")
