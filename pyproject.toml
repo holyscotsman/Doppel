@@ -3,7 +3,10 @@ name = "doppel"
 version = "0.1.0"
 description = "Scan a Google Drive photo library and surface duplicates for human review"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "google-api-python-client>=2.198.0",
+    "google-auth-oauthlib>=1.4.0",
+]
 
 [dependency-groups]
 dev = [

@@ -5,6 +5,8 @@ token.json
 # local data
 cache/
 *.db
+*.db-wal
+*.db-shm
 
 # python
 .venv/

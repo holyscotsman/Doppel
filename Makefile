@@ -23,4 +23,4 @@ format: ## Auto-format and fix lint issues
 	uv run ruff check --fix src tests
 
 scan: ## Sync the Drive photo inventory
-	@echo "scan: implemented in Phase 1" && exit 1
+	uv run python -m doppel.scan
