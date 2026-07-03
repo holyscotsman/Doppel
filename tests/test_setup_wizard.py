@@ -610,3 +610,29 @@ def test_plain_setup_load_does_not_probe_ollama(tmp_path, monkeypatch):
         assert calls == []  # no probe
         client.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
         assert calls == ["http://127.0.0.1:11434"]  # probe only on test
+
+
+def test_failed_test_shows_ollama_install_help(wizard):
+    # host that the fixture lister rejects -> unreachable -> install steps
+    page = wizard.get("/setup", params={"ollama_host": "http://127.0.0.1:9999"})
+    assert "Test failed" in page.text
+    assert "Get Ollama running" in page.text
+    assert "macOS" in page.text and "Windows" in page.text
+    assert "ollama.com/download" in page.text
+
+
+def test_no_models_shows_pull_hint_not_install(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        CONFIG_TEMPLATE.format(db=tmp_path / "t.db", cache=tmp_path / "cache")
+    )
+    app = create_app(
+        config_path=cfg,
+        fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir),
+        ollama_lister=lambda host: [],  # reachable, no usable models
+    )
+    with TestClient(app) as client:
+        page = client.get("/setup", params={"ollama_host": "http://127.0.0.1:11434"})
+        assert "ollama pull gemma3" in page.text
+        assert "Get Ollama running" not in page.text  # it IS running

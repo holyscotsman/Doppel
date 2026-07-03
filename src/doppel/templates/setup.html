@@ -47,6 +47,23 @@
     <p class="{{ 'ok' if ollama_status.ok else 'error' }}">
       {{ '✓' if ollama_status.ok else '✕' }} {{ ollama_status.message }}
     </p>
+    {% if ollama_status.kind == 'unreachable' %}
+    <div class="note">
+      <strong>Get Ollama running, then test again:</strong>
+      <ul class="help">
+        <li><strong>macOS:</strong> download from
+          <a href="https://ollama.com/download/mac" target="_blank" rel="noopener">ollama.com/download</a>
+          (or <code>brew install ollama</code>), then open the Ollama app so it starts serving.</li>
+        <li><strong>Windows:</strong> download the installer from
+          <a href="https://ollama.com/download/windows" target="_blank" rel="noopener">ollama.com/download</a>
+          and run it — Ollama starts automatically in the background.</li>
+      </ul>
+      Then pull a vision model in a terminal: <code>ollama pull gemma3</code>.
+    </div>
+    {% elif ollama_status.kind == 'no_models' %}
+    <p class="muted">Pull one that can compare images, e.g.
+      <code>ollama pull gemma3</code>, then press “test connection” again.</p>
+    {% endif %}
   {% endif %}
   {% if models %}
   <form method="post" action="/setup/ollama" class="decision">

@@ -308,17 +308,24 @@ def create_app(
                 if models:
                     ollama_status = {
                         "ok": True,
+                        "kind": "ok",
                         "message": f"Test successful — {len(models)} usable "
                         f"model{'s' if len(models) != 1 else ''} found.",
                     }
                 else:
                     ollama_status = {
                         "ok": False,
+                        "kind": "no_models",
                         "message": "Connected, but no multi-image vision models "
-                        "are installed. Pull one, e.g. `ollama pull gemma3`.",
+                        "are installed yet.",
                     }
             except Exception as exc:
-                ollama_status = {"ok": False, "message": f"Test failed: {exc}"}
+                ollama_status = {
+                    "ok": False,
+                    "kind": "unreachable",
+                    "message": f"Test failed — could not reach Ollama at {host}.",
+                    "detail": str(exc),
+                }
         return templates.TemplateResponse(
             request,
             "setup.html",
