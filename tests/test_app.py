@@ -116,3 +116,18 @@ def test_group_list_pagination(client, config) -> None:
     page2 = client.get("/groups", params={"tier": "exact", "page": 2})
     assert "page 1 / 2" in page1.text
     assert "page 2 / 2" in page2.text
+
+
+def test_near_stage_via_ui(client, config) -> None:
+    conn = connect(config.db_path)
+    insert_photo(conn, "n1", md5="m1")
+    insert_photo(conn, "n2", md5="m2")
+    conn.close()
+
+    resp = client.post("/scans/near")
+    assert resp.status_code == 200
+    client.app.state.runner.wait(timeout=10)
+
+    # both photos get the fake fetcher's default image -> one near group
+    page = client.get("/groups", params={"tier": "near"})
+    assert "2 photos" in page.text

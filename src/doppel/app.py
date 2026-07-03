@@ -17,11 +17,12 @@ from doppel.db import connect
 from doppel.drive import GoogleDriveClient, ImageFetcher, get_credentials
 from doppel.jobs import JobRunner, run_sync
 from doppel.stages.exact import run_exact
+from doppel.stages.near import run_near
 
 PACKAGE_DIR = Path(__file__).parent
 
 # stages the UI can launch, in pipeline order; extended phase by phase
-UI_STAGES = ["sync", "exact"]
+UI_STAGES = ["sync", "exact", "near"]
 
 PAGE_SIZE = 20
 
@@ -96,6 +97,8 @@ def create_app(
                 run_sync(conn, GoogleDriveClient(creds))
             elif stage == "exact":
                 run_exact(conn)
+            elif stage == "near":
+                run_near(conn, get_fetcher(), config)
         finally:
             conn.close()
 

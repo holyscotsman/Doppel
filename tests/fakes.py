@@ -107,20 +107,28 @@ def jpeg_bytes(size: tuple[int, int] = (32, 32), color: str = "red") -> bytes:
 
 
 class FakeImageFetcher:
-    """Serves generated JPEGs from the cache dir without any network."""
+    """Serves generated JPEGs from the cache dir without any network.
 
-    def __init__(self, cache_dir) -> None:
+    `images` maps drive_id -> jpeg bytes (default: a flat red square);
+    map a drive_id to an Exception instance to simulate a fetch failure.
+    """
+
+    def __init__(self, cache_dir, images: dict[str, object] | None = None) -> None:
         from pathlib import Path
 
         self.cache_dir = Path(cache_dir)
+        self.images = images or {}
         self.calls: list[tuple[str, int | str]] = []
 
     def get(self, drive_id: str, size: int | str = 512):
         self.calls.append((drive_id, size))
+        source = self.images.get(drive_id)
+        if isinstance(source, BaseException):
+            raise source
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path = self.cache_dir / f"{drive_id}_{size}.jpg"
         if not path.exists():
-            path.write_bytes(jpeg_bytes())
+            path.write_bytes(source if source is not None else jpeg_bytes())
         return path
 
 
