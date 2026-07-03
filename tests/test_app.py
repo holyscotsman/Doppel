@@ -157,3 +157,51 @@ def test_similar_stage_via_ui(config) -> None:
 
         page = ui.get("/groups", params={"tier": "similar"})
         assert "2 photos" in page.text
+
+
+def test_dashboard_shows_exact_group_count(client, config) -> None:
+    seed_duplicates(config)
+    run_exact_via_ui(client)
+
+    resp = client.get("/")
+    # exactly one exact group: its count card must render 1
+    assert '<div class="big">1</div>' in resp.text
+
+
+def test_stage_error_is_delivered_out_of_band(client, monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post("/scans/sync")
+
+    # error rides an hx-swap-oob div so the 2s poller cannot erase it
+    assert 'id="scan-error" hx-swap-oob="true"' in resp.text
+    assert "credentials.json not found" in resp.text
+
+    # the polled partial itself never carries the error
+    partial = client.get("/partials/scans")
+    assert "credentials.json" not in partial.text
+
+
+def test_sync_auth_failure_recorded_in_scans_ledger(
+    client, config, monkeypatch, tmp_path
+) -> None:
+    # token.json exists but is garbage and there is no credentials.json:
+    # the precheck passes, the worker must record a failed scan
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "token.json").write_text("not json")
+
+    resp = client.post("/scans/sync")
+    assert resp.status_code == 200
+    client.app.state.runner.wait(timeout=10)
+
+    conn = connect(config.db_path)
+    scan = conn.execute(
+        "SELECT * FROM scans WHERE stage = 'sync' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert scan is not None
+    assert scan["status"] == "failed"
+    assert (
+        "authorization required" in scan["error"].lower()
+        or "CredentialsRequired" in scan["error"]
+    )

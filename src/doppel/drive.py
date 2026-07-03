@@ -29,13 +29,21 @@ class DriveClient(Protocol):
         ...
 
 
+class CredentialsRequired(RuntimeError):
+    """Interactive OAuth is needed but the caller cannot run it."""
+
+
 def get_credentials(
     credentials_path: Path | str = "credentials.json",
     token_path: Path | str = "token.json",
+    allow_interactive: bool = True,
 ) -> Any:
     """Run the OAuth installed-app flow, caching the refresh token.
 
-    Never log or print the credential contents.
+    allow_interactive=False (web worker threads, request handlers) raises
+    CredentialsRequired instead of opening a browser consent flow — an
+    interactive flow on a background thread would block it forever if the
+    user misses the tab. Never log or print the credential contents.
     """
     from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
@@ -58,6 +66,11 @@ def get_credentials(
         except RefreshError:
             creds = None  # token revoked/expired — fall through to re-auth
     if not creds or not creds.valid:
+        if not allow_interactive:
+            raise CredentialsRequired(
+                "Drive authorization required — run `make scan` once in a "
+                "terminal to complete the OAuth consent flow."
+            )
         if not credentials_path.exists():
             raise FileNotFoundError(
                 f"{credentials_path} not found. Create an OAuth client ID "
@@ -145,8 +158,13 @@ class DriveImageFetcher:
     - No thumbnailLink: fetch original bytes and downscale locally (the
       only case where original bytes transit, and only as a fallback).
     - size="orig": fetch original bytes, cache as-is. Unused until Phase 7.
-    - Exponential backoff on 429 and 5xx responses; the expired-link
-      refresh path covers transient 403s.
+    - Exponential backoff on 429/5xx always; a first 403/404 is treated as
+      an expired link (refresh via files.get, retry once), and 403s on the
+      refreshed link are treated as rate limiting and backed off too.
+    - Cache writes are atomic (temp file + rename) so an interrupted write
+      can never poison a cache entry.
+    - Every failure surfaces as FetchError; no client/transport exception
+      escapes this abstraction.
     """
 
     MAX_ATTEMPTS = 4
@@ -170,7 +188,7 @@ class DriveImageFetcher:
         if size == "orig":
             path = self._cache_dir / f"{drive_id}_orig"
             if not path.exists():
-                path.write_bytes(self._client.download_file(drive_id))
+                self._write_atomic(path, self._download(drive_id))
             return path
 
         path = self._cache_dir / f"{drive_id}_{size}.jpg"
@@ -182,33 +200,64 @@ class DriveImageFetcher:
         if link is None:
             link = self._refresh_link(drive_id)
             refreshed = True
-        if link is None:
-            self._downscale_original(drive_id, size, path)
-        else:
+        if link is not None:
             resp = self._request(_rewrite_size(link, size))
             if resp.status_code in (403, 404) and not refreshed:
                 link = self._refresh_link(drive_id)
                 if link is not None:
-                    resp = self._request(_rewrite_size(link, size))
-            if resp.status_code != 200:
-                raise FetchError(
-                    f"thumbnail fetch for {drive_id} failed "
-                    f"with HTTP {resp.status_code}"
-                )
-            path.write_bytes(resp.content)
+                    # a 403 on a freshly refreshed link is rate limiting,
+                    # not expiry — back off on it
+                    resp = self._request(_rewrite_size(link, size), retry_403=True)
+            if link is not None:
+                if resp.status_code != 200:
+                    raise FetchError(
+                        f"thumbnail fetch for {drive_id} failed "
+                        f"with HTTP {resp.status_code}"
+                    )
+                self._write_atomic(path, resp.content)
+                self._record_thumb_path(drive_id, path)
+                return path
+        # no thumbnailLink at all (rare): fetch original bytes, downscale
+        # locally — the only case where original bytes ever transit
+        self._downscale_original(drive_id, size, path)
         self._record_thumb_path(drive_id, path)
         return path
 
-    def _request(self, url: str) -> Any:
-        """GET with exponential backoff on 429/5xx."""
+    def _request(self, url: str, retry_403: bool = False) -> Any:
+        """GET with exponential backoff on 429/5xx (and 403 when asked)."""
         resp = None
         for attempt in range(self.MAX_ATTEMPTS):
-            resp = self._session.get(url)
-            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+            try:
+                resp = self._session.get(url)
+            except Exception as exc:
+                raise FetchError(f"thumbnail request failed: {exc}") from exc
+            retryable = (
+                resp.status_code == 429
+                or 500 <= resp.status_code < 600
+                or (retry_403 and resp.status_code == 403)
+            )
+            if retryable and attempt < self.MAX_ATTEMPTS - 1:
                 self._sleep(2**attempt)
                 continue
             return resp
         return resp
+
+    @staticmethod
+    def _write_atomic(path: Path, data: bytes) -> None:
+        """Write via temp file + rename: a crash mid-write can never leave a
+        truncated file that path.exists() would treat as a cache hit."""
+        import os
+        import threading
+
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+
+    def _download(self, drive_id: str) -> bytes:
+        try:
+            return self._client.download_file(drive_id)
+        except Exception as exc:
+            raise FetchError(f"download of {drive_id} failed: {exc}") from exc
 
     def _stored_link(self, drive_id: str) -> str | None:
         import sqlite3
@@ -223,7 +272,12 @@ class DriveImageFetcher:
             conn.close()
 
     def _refresh_link(self, drive_id: str) -> str | None:
-        link = self._client.get_thumbnail_link(drive_id)
+        try:
+            link = self._client.get_thumbnail_link(drive_id)
+        except Exception as exc:
+            raise FetchError(
+                f"thumbnail-link refresh for {drive_id} failed: {exc}"
+            ) from exc
         if link is not None:
             self._update_photo(drive_id, "thumbnail_link", link)
         return link
@@ -250,7 +304,12 @@ class DriveImageFetcher:
 
         from PIL import Image
 
-        data = self._client.download_file(drive_id)
-        img = Image.open(io.BytesIO(data))
-        img.thumbnail((size, size))
-        img.convert("RGB").save(path, "JPEG")
+        data = self._download(drive_id)
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.thumbnail((size, size))
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "JPEG")
+        except Exception as exc:
+            raise FetchError(f"downscale of {drive_id} failed: {exc}") from exc
+        self._write_atomic(path, buf.getvalue())

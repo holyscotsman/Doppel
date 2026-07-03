@@ -19,6 +19,7 @@
 </div>
 
 <h2>Scans</h2>
+<div id="scan-error"></div>
 <div id="scan-status" hx-get="/partials/scans" hx-trigger="every 2s" hx-swap="innerHTML">
   {% include "_scan_status.html" %}
 </div>

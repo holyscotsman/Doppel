@@ -3,7 +3,9 @@ htmx); binds to 127.0.0.1 only (see Makefile run target)."""
 
 from __future__ import annotations
 
+import html
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -19,9 +21,15 @@ from fastapi.templating import Jinja2Templates
 
 from doppel.config import Config, load_config
 from doppel.db import connect
-from doppel.drive import GoogleDriveClient, ImageFetcher, get_credentials
+from doppel.drive import (
+    CredentialsRequired,
+    FetchError,
+    GoogleDriveClient,
+    ImageFetcher,
+    get_credentials,
+)
 from doppel.embed import ClipEmbedder, Embedder
-from doppel.jobs import JobRunner, now, run_sync
+from doppel.jobs import JobRunner, fail_scan, now, run_sync, start_scan
 from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
@@ -39,7 +47,7 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
 
     from doppel.drive import DriveImageFetcher
 
-    creds = get_credentials()
+    creds = get_credentials(allow_interactive=False)
     return DriveImageFetcher(
         db_path=config.db_path,
         client=GoogleDriveClient(creds),
@@ -76,15 +84,23 @@ def create_app(
         finally:
             conn.close()
 
+    # request handlers run on threadpool threads: lazy singletons need a lock
+    init_lock = threading.Lock()
+
     def get_fetcher() -> ImageFetcher:
-        if app.state.fetcher is None:
-            app.state.fetcher = fetcher_factory(config)
-        return app.state.fetcher
+        with init_lock:
+            if app.state.fetcher is None:
+                try:
+                    app.state.fetcher = fetcher_factory(config)
+                except CredentialsRequired as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+            return app.state.fetcher
 
     def get_embedder() -> Embedder:
-        if app.state.embedder is None:
-            app.state.embedder = embedder_factory(config)
-        return app.state.embedder
+        with init_lock:
+            if app.state.embedder is None:
+                app.state.embedder = embedder_factory(config)
+            return app.state.embedder
 
     def scan_overview(conn: sqlite3.Connection) -> list[dict]:
         """Latest scans row per UI stage, plus whether it is the live job."""
@@ -108,7 +124,17 @@ def create_app(
         conn = connect(config.db_path)
         try:
             if stage == "sync":
-                creds = get_credentials()
+                try:
+                    # never run the interactive OAuth flow on the worker
+                    # thread — it would block the runner forever if the
+                    # consent tab is missed
+                    creds = get_credentials(allow_interactive=False)
+                except Exception as exc:
+                    # record the failure so the UI can show it; without a
+                    # scans row the click would look like a silent no-op
+                    scan_id = start_scan(conn, "sync")
+                    fail_scan(conn, scan_id, f"{type(exc).__name__}: {exc}")
+                    return
                 run_sync(conn, GoogleDriveClient(creds))
             elif stage == "exact":
                 run_exact(conn)
@@ -147,7 +173,7 @@ def create_app(
     @app.get("/partials/scans", response_class=HTMLResponse)
     def scans_partial(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         return templates.TemplateResponse(
-            request, "_scan_status.html", {"scans": scan_overview(conn), "error": None}
+            request, "_scan_status.html", {"scans": scan_overview(conn)}
         )
 
     @app.post("/scans/{stage}", response_class=HTMLResponse)
@@ -166,9 +192,14 @@ def create_app(
             )
         elif not app.state.runner.start(stage, lambda: run_stage_job(stage)):
             error = "a job is already running"
-        return templates.TemplateResponse(
-            request, "_scan_status.html", {"scans": scan_overview(conn), "error": error}
+        # the error goes into #scan-error via an out-of-band swap: the polled
+        # #scan-status region is replaced every 2s, which would erase it
+        table = templates.get_template("_scan_status.html").render(
+            request=request, scans=scan_overview(conn)
         )
+        message = f'<p class="error">{html.escape(error)}</p>' if error else ""
+        oob = f'<div id="scan-error" hx-swap-oob="true">{message}</div>'
+        return HTMLResponse(table + oob)
 
     @app.get("/scans/{scan_id}")
     def scan_status(scan_id: int, conn: sqlite3.Connection = Depends(get_conn)):
@@ -354,7 +385,10 @@ def create_app(
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="no such photo")
-        path = fetcher.get(row["drive_id"], config.thumb_size)
+        try:
+            path = fetcher.get(row["drive_id"], config.thumb_size)
+        except FetchError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         return FileResponse(path, media_type="image/jpeg")
 
     return app

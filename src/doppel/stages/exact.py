@@ -23,7 +23,6 @@ def run_exact(conn: sqlite3.Connection) -> int:
     """Group active photos byte-identical by md5. Returns the scans row id."""
     scan_id = start_scan(conn, "exact")
     try:
-        rebuild_groups(conn, "exact")
         dupes = conn.execute(
             """
             SELECT md5, COUNT(*) AS n FROM photos
@@ -32,8 +31,13 @@ def run_exact(conn: sqlite3.Connection) -> int:
             ORDER BY md5
             """
         ).fetchall()
+        # commit total before the rebuild transaction so the polling UI
+        # (on its own connection) can see it; the rebuild itself stays
+        # atomic in the transaction below
         conn.execute("UPDATE scans SET total = ? WHERE id = ?", (len(dupes), scan_id))
-        for i, row in enumerate(dupes, start=1):
+        conn.commit()
+        rebuild_groups(conn, "exact")
+        for row in dupes:
             cur = conn.execute(
                 "INSERT INTO groups (tier, created_at) VALUES ('exact', ?)",
                 (now(),),
@@ -47,7 +51,9 @@ def run_exact(conn: sqlite3.Connection) -> int:
                 """,
                 (group_id, row["md5"]),
             )
-            conn.execute("UPDATE scans SET processed = ? WHERE id = ?", (i, scan_id))
+        conn.execute(
+            "UPDATE scans SET processed = ? WHERE id = ?", (len(dupes), scan_id)
+        )
         conn.commit()
         finish_scan(conn, scan_id, total=len(dupes))
     except BaseException as exc:

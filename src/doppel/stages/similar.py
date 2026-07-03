@@ -71,7 +71,7 @@ def _embed_missing(
     return len(todo)
 
 
-def _load_vectors(conn: sqlite3.Connection) -> dict[int, np.ndarray]:
+def load_vectors(conn: sqlite3.Connection) -> dict[int, np.ndarray]:
     """Stored vectors for active photos only."""
     return {
         row["photo_id"]: np.frombuffer(row["embedding"], dtype=np.float32)
@@ -133,7 +133,7 @@ def run_similar(
         ensure_vec_schema(conn)
         n_embedded = _embed_missing(conn, fetcher, embedder, config, scan_id)
 
-        vectors = _load_vectors(conn)
+        vectors = load_vectors(conn)
         uf = UnionFind()
         for a, b in _similar_pairs(conn, vectors, config):
             uf.union(a, b)

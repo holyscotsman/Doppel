@@ -139,3 +139,68 @@ def test_orig_fetch_caches_as_is(tmp_path) -> None:
     assert path == again
     assert path.read_bytes() == b"original-bytes"
     assert client.download_requests == ["o1"]  # cached on second call
+
+
+def test_403_on_refreshed_link_backs_off(db_path, tmp_path) -> None:
+    # first 403 = expired link; 403s on the refreshed link = rate limiting
+    responses = [FakeResponse(403)] + [
+        FakeResponse(403)
+    ] * DriveImageFetcher.MAX_ATTEMPTS
+    session = FakeSession(responses)
+    client = FakeThumbClient(link="https://lh3.example/new=s220")
+    fetcher, sleeps = make_fetcher(db_path, tmp_path, client, session)
+
+    with pytest.raises(FetchError):
+        fetcher.get("pic1", 512)
+
+    assert client.link_requests == ["pic1"]  # exactly one refresh
+    assert sleeps == [1, 2, 4]  # backoff between retries, none after the last
+
+
+def test_no_sleep_after_final_attempt(db_path, tmp_path) -> None:
+    session = FakeSession([FakeResponse(500)] * DriveImageFetcher.MAX_ATTEMPTS)
+    fetcher, sleeps = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
+
+    with pytest.raises(FetchError):
+        fetcher.get("pic1", 512)
+
+    assert sleeps == [1, 2, 4]  # not [1, 2, 4, 8]
+
+
+def test_stale_link_with_no_replacement_falls_back_to_original(
+    db_path, tmp_path
+) -> None:
+    # link 404s and files.get says the file no longer has a thumbnailLink
+    session = FakeSession([FakeResponse(404)])
+    client = FakeThumbClient(link=None, file_bytes=jpeg_bytes(size=(1024, 768)))
+    fetcher, _ = make_fetcher(db_path, tmp_path, client, session)
+
+    path = fetcher.get("pic1", 512)
+
+    assert client.download_requests == ["pic1"]
+    assert path.exists()
+
+
+def test_client_errors_surface_as_fetch_error(db_path, tmp_path) -> None:
+    class ExplodingClient:
+        def get_thumbnail_link(self, drive_id):
+            raise RuntimeError("HttpError 404")
+
+        def download_file(self, drive_id):
+            raise RuntimeError("HttpError 404")
+
+    session = FakeSession([FakeResponse(404)])
+    fetcher, _ = make_fetcher(db_path, tmp_path, ExplodingClient(), session)
+
+    with pytest.raises(FetchError):
+        fetcher.get("pic1", 512)
+
+
+def test_no_partial_cache_files_left_behind(db_path, tmp_path) -> None:
+    session = FakeSession([FakeResponse(200, b"data")])
+    fetcher, _ = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
+
+    fetcher.get("pic1", 512)
+
+    leftovers = list((tmp_path / "cache").glob("*.part"))
+    assert leftovers == []
