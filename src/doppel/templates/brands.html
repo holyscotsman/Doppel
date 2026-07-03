@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}brands — doppel{% endblock %}
+{% block content %}
+<h2>Brands</h2>
+<p>
+  <a href="/brands/photos?queue=1">
+    review queue: {{ queue_count }} tag{{ "s" if queue_count != 1 }}
+    at confidence &le; {{ threshold }}
+  </a>
+</p>
+{% if not brands %}
+<p class="muted">No brand tags yet. Run the brand stage from the <a href="/">dashboard</a>
+after reviewing duplicates.</p>
+{% endif %}
+<table>
+  {% for b in brands %}
+  <tr>
+    <td><a href="/brands/photos?brand={{ b.value | urlencode }}">{{ b.value }}</a></td>
+    <td>{{ b.n }} photo{{ "s" if b.n != 1 }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

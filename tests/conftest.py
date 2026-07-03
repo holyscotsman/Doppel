@@ -26,5 +26,6 @@ def config(tmp_path) -> Config:
             host="http://127.0.0.1:11434",
             model="test-model",
             adjudicate_band_min=0.85,
+            brand_review_max_confidence=0.6,
         ),
     )

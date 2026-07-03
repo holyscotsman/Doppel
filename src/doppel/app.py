@@ -31,6 +31,7 @@ from doppel.drive import (
 from doppel.embed import ClipEmbedder, Embedder
 from doppel.jobs import JobRunner, fail_scan, now, run_sync, start_scan
 from doppel.stages.adjudicate import run_adjudicate
+from doppel.stages.brand import correct_brand, run_brand
 from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
@@ -39,7 +40,7 @@ from doppel.vlm import OllamaClient, VlmClient
 PACKAGE_DIR = Path(__file__).parent
 
 # stages the UI can launch, in pipeline order; extended phase by phase
-UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
+UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate", "brand"]
 
 PAGE_SIZE = 20
 
@@ -157,6 +158,8 @@ def create_app(
                 run_similar(conn, get_fetcher(), get_embedder(), config)
             elif stage == "adjudicate":
                 run_adjudicate(conn, get_fetcher(), get_vlm(), config)
+            elif stage == "brand":
+                run_brand(conn, get_fetcher(), get_vlm(), config)
         finally:
             conn.close()
 
@@ -399,6 +402,100 @@ def create_app(
             )
         conn.commit()
         return RedirectResponse(url=f"/groups/{group_id}", status_code=303)
+
+    @app.get("/brands", response_class=HTMLResponse)
+    def brand_summary(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+        threshold = config.ollama.brand_review_max_confidence
+        brands = conn.execute(
+            """
+            SELECT value, COUNT(*) AS n FROM tags
+            WHERE kind = 'brand' GROUP BY value ORDER BY n DESC, value
+            """
+        ).fetchall()
+        queue_count = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM tags
+            WHERE kind = 'brand' AND source = 'vlm'
+              AND (confidence IS NULL OR confidence <= ?)
+            """,
+            (threshold,),
+        ).fetchone()["n"]
+        return templates.TemplateResponse(
+            request,
+            "brands.html",
+            {"brands": brands, "queue_count": queue_count, "threshold": threshold},
+        )
+
+    @app.get("/brands/photos", response_class=HTMLResponse)
+    def brand_photos(
+        request: Request,
+        brand: str | None = None,
+        queue: int = 0,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        threshold = config.ollama.brand_review_max_confidence
+        clauses = ["t.kind = 'brand'"]
+        params: list = []
+        if brand is not None:
+            clauses.append("t.value = ?")
+            params.append(brand)
+        if queue:
+            clauses.append(
+                "t.source = 'vlm' AND (t.confidence IS NULL OR t.confidence <= ?)"
+            )
+            params.append(threshold)
+        photos = conn.execute(
+            f"""
+            SELECT p.id, p.name, t.value, t.confidence, t.source,
+                   (SELECT v.response FROM vlm_results v
+                    WHERE v.task = 'brand' AND v.photo_id = p.id
+                    ORDER BY v.id DESC LIMIT 1) AS response
+            FROM tags t JOIN photos p ON p.id = t.photo_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY t.confidence, p.name
+            """,  # noqa: S608 — clauses are fixed strings, values are bound
+            params,
+        ).fetchall()
+        rows = []
+        for p in photos:
+            evidence = ""
+            if p["response"]:
+                import json as _json
+
+                try:
+                    evidence = _json.loads(p["response"]).get("evidence", "")
+                except ValueError:
+                    pass
+            rows.append({**dict(p), "evidence": evidence})
+        return templates.TemplateResponse(
+            request,
+            "brand_photos.html",
+            {"photos": rows, "brand": brand, "queue": queue},
+        )
+
+    @app.post("/photos/{photo_id}/brand")
+    async def save_brand_correction(
+        request: Request,
+        photo_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        row = conn.execute("SELECT id FROM photos WHERE id = ?", (photo_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such photo")
+        form = await request.form()
+        value = str(form.get("value", "")).strip()
+        if not value:
+            raise HTTPException(status_code=422, detail="brand value required")
+        correct_brand(conn, photo_id, value)
+        back = "/brands/photos"
+        query = []
+        if form.get("brand"):
+            query.append(f"brand={form['brand']}")
+        if form.get("queue"):
+            query.append("queue=1")
+        if query:
+            back += "?" + "&".join(query)
+        return RedirectResponse(url=back, status_code=303)
 
     @app.get("/export")
     def export_csv(conn: sqlite3.Connection = Depends(get_conn)):

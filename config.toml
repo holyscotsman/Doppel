@@ -11,3 +11,4 @@ cache_dir = "cache"
 host = "http://127.0.0.1:11434"
 model = "gemma3:27b"         # any pulled multi-image vision model
 adjudicate_band_min = 0.85   # pairs in [this, similar_cosine_min) go to the VLM
+brand_review_max_confidence = 0.6  # brand tags at/below this land in the review queue

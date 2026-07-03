@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS scans (
   error       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tags (
+  photo_id   INTEGER NOT NULL REFERENCES photos(id),
+  kind       TEXT NOT NULL,            -- 'brand'
+  value      TEXT NOT NULL,
+  confidence REAL,
+  source     TEXT NOT NULL,            -- vlm | human
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (photo_id, kind)
+);
+
 CREATE TABLE IF NOT EXISTS vlm_results (
   id             INTEGER PRIMARY KEY,
   task           TEXT NOT NULL,        -- adjudicate | brand
