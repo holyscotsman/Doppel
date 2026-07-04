@@ -25,6 +25,7 @@ from doppel.drive import ImageFetcher
 from doppel.jobs import fail_scan, finish_scan, now, start_scan
 from doppel.stages.exact import rebuild_groups
 from doppel.stages.grouping import UnionFind
+from doppel.stages.parallel import DbWriter, parallel_map
 
 # structural constants of the colorway metric (not tunable thresholds):
 # coarse bins tolerate JPEG chroma noise; the decision threshold
@@ -78,7 +79,13 @@ def _hash_missing(
     scan_id: int,
 ) -> int:
     """Hash every active photo lacking hashes. Resumable: photos hashed on a
-    previous run are skipped by the WHERE clause. Returns the number due."""
+    previous run are skipped by the WHERE clause. Returns the number due.
+
+    Fetch + hash run across ``perf.hash_workers`` threads (both the network
+    fetch and the pHash/dHash release the GIL), while a single DbWriter thread
+    owns every write to ``conn``. A failed photo is simply left un-hashed and
+    retried next run — identical resumability to the old serial path.
+    """
     todo = conn.execute(
         """
         SELECT id, drive_id FROM photos
@@ -88,21 +95,28 @@ def _hash_missing(
     ).fetchall()
     conn.execute("UPDATE scans SET total = ? WHERE id = ?", (len(todo), scan_id))
     conn.commit()
-    for i, row in enumerate(todo, start=1):
-        try:
-            path = fetcher.get(row["drive_id"], config.thumb_size)
-            with Image.open(path) as img:
-                phash, dhash = compute_hashes(img)
-        except Exception:
-            # leave un-hashed: the next run retries this photo
-            traceback.print_exc()
-        else:
-            conn.execute(
-                "UPDATE photos SET phash = ?, dhash = ? WHERE id = ?",
-                (phash, dhash, row["id"]),
+
+    def fetch_and_hash(row: sqlite3.Row) -> tuple[str, str]:
+        path = fetcher.get(row["drive_id"], config.thumb_size)
+        with Image.open(path) as img:
+            return compute_hashes(img)
+
+    perf = config.perf
+    processed = 0
+    with DbWriter(conn, perf.db_batch, perf.queue_maxsize) as writer:
+        for row, result in parallel_map(fetch_and_hash, todo, perf.hash_workers):
+            processed += 1
+            if isinstance(result, Exception):
+                traceback.print_exception(result)  # leave un-hashed; retried next run
+            else:
+                phash, dhash = result
+                writer.put(
+                    "UPDATE photos SET phash = ?, dhash = ? WHERE id = ?",
+                    (phash, dhash, row["id"]),
+                )
+            writer.put(
+                "UPDATE scans SET processed = ? WHERE id = ?", (processed, scan_id)
             )
-        conn.execute("UPDATE scans SET processed = ? WHERE id = ?", (i, scan_id))
-        conn.commit()
     return len(todo)
 
 

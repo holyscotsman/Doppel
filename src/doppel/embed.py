@@ -31,21 +31,29 @@ class ClipEmbedder:
     """open_clip ViT model; loaded lazily on first embed call."""
 
     def __init__(self, model_spec: str) -> None:
+        import threading
+
         # model_spec e.g. "ViT-B-32/laion2b_s34b_b79k" from config.toml
         self._model_name, self._pretrained = model_spec.split("/", 1)
         self._loaded: tuple[Any, Any, str] | None = None
+        # embed() is called only from the similar stage's single consumer
+        # thread, but guard the one-time load anyway so a future concurrent
+        # caller can't race two model loads onto the GPU.
+        self._load_lock = threading.Lock()
 
     def _load(self) -> tuple[Any, Any, str]:
         if self._loaded is None:
-            import open_clip
-            import torch
+            with self._load_lock:
+                if self._loaded is None:
+                    import open_clip
+                    import torch
 
-            device = pick_device(torch)
-            model, _, preprocess = open_clip.create_model_and_transforms(
-                self._model_name, pretrained=self._pretrained
-            )
-            model = model.to(device).eval()
-            self._loaded = (model, preprocess, device)
+                    device = pick_device(torch)
+                    model, _, preprocess = open_clip.create_model_and_transforms(
+                        self._model_name, pretrained=self._pretrained
+                    )
+                    model = model.to(device).eval()
+                    self._loaded = (model, preprocess, device)
         return self._loaded
 
     def embed(self, paths: list[Path]) -> np.ndarray:

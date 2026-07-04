@@ -20,6 +20,7 @@ from doppel.embed import BATCH_SIZE, Embedder
 from doppel.jobs import fail_scan, finish_scan, now, start_scan
 from doppel.stages.exact import rebuild_groups
 from doppel.stages.grouping import UnionFind
+from doppel.stages.parallel import DbWriter, parallel_map
 
 K_NEIGHBORS = 20  # per SPEC "Stage 3 — similar"
 
@@ -32,7 +33,16 @@ def _embed_missing(
     scan_id: int,
 ) -> int:
     """Embed every active photo without a stored vector. Resumable: photos
-    embedded on a previous run are excluded by the query."""
+    embedded on a previous run are excluded by the query.
+
+    Three roles run concurrently: ``perf.embed_fetch_workers`` threads download
+    thumbnails, the single main thread batches them ``perf.clip_batch`` at a
+    time through the embedder (CLIP is called from ONE thread only — MPS is not
+    thread-safe), and a DbWriter thread owns every INSERT. A photo whose fetch
+    fails is left un-embedded and retried next run. Fetch order doesn't affect
+    correctness: each vector is stored against its own photo id, and grouping
+    reads them back independently.
+    """
     todo = conn.execute(
         """
         SELECT id, drive_id FROM photos
@@ -43,31 +53,44 @@ def _embed_missing(
     ).fetchall()
     conn.execute("UPDATE scans SET total = ? WHERE id = ?", (len(todo), scan_id))
     conn.commit()
+
+    perf = config.perf
+    clip_batch = max(1, perf.clip_batch or BATCH_SIZE)
+
+    def fetch_one(row: sqlite3.Row) -> Path:
+        return fetcher.get(row["drive_id"], config.thumb_size)
+
     processed = 0
-    for start in range(0, len(todo), BATCH_SIZE):
-        batch = todo[start : start + BATCH_SIZE]
-        rows: list[sqlite3.Row] = []
-        paths: list[Path] = []
-        for row in batch:
-            try:
-                paths.append(fetcher.get(row["drive_id"], config.thumb_size))
-            except Exception:
-                # leave un-embedded: the next run retries this photo
-                traceback.print_exc()
-            else:
-                rows.append(row)
-        if rows:
-            vectors = embedder.embed(paths)
-            for row, vector in zip(rows, vectors, strict=True):
-                conn.execute(
+    buf_rows: list[sqlite3.Row] = []
+    buf_paths: list[Path] = []
+
+    with DbWriter(conn, perf.db_batch, perf.queue_maxsize) as writer:
+
+        def flush_embeddings() -> None:
+            if not buf_rows:
+                return
+            vectors = embedder.embed(buf_paths)  # main thread only (MPS)
+            for r, vector in zip(buf_rows, vectors, strict=True):
+                writer.put(
                     "INSERT INTO embeddings (photo_id, embedding) VALUES (?, ?)",
-                    (row["id"], vector.astype(np.float32).tobytes()),
+                    (r["id"], vector.astype(np.float32).tobytes()),
                 )
-        processed += len(batch)
-        conn.execute(
-            "UPDATE scans SET processed = ? WHERE id = ?", (processed, scan_id)
-        )
-        conn.commit()
+            buf_rows.clear()
+            buf_paths.clear()
+
+        for row, result in parallel_map(fetch_one, todo, perf.embed_fetch_workers):
+            processed += 1
+            if isinstance(result, Exception):
+                traceback.print_exception(result)  # retried next run
+            else:
+                buf_rows.append(row)
+                buf_paths.append(result)
+                if len(buf_rows) >= clip_batch:
+                    flush_embeddings()
+            writer.put(
+                "UPDATE scans SET processed = ? WHERE id = ?", (processed, scan_id)
+            )
+        flush_embeddings()  # tail
     return len(todo)
 
 

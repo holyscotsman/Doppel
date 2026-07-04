@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -12,6 +13,22 @@ class OllamaConfig:
     host: str
     model: str
     adjudicate_band_min: float
+
+
+@dataclass(frozen=True)
+class PerfConfig:
+    """How hard to push the machine during the deeper scans. Worker counts and
+    batch sizes are never hardcoded in the stages — they come from here so the
+    [perf] section in config.toml can tune them to the host. Defaults suit a
+    modern multi-core Mac; load_config fills worker counts from os.cpu_count()."""
+
+    fetch_workers: int = 8  # parallel thumbnail fetches (I/O bound)
+    hash_workers: int = 8  # parallel fetch + pHash/dHash in the near stage
+    embed_fetch_workers: int = 8  # prefetch threads feeding the CLIP batcher
+    clip_batch: int = 32  # images per embedder.embed() pass on the GPU
+    db_batch: int = 100  # rows per sqlite transaction from the single writer
+    adjudicate_workers: int = 3  # fetch + VLM threads (Ollama is one server)
+    queue_maxsize: int = 40  # bounded worker→writer handoff, for backpressure
 
 
 @dataclass(frozen=True)
@@ -26,6 +43,7 @@ class Config:
     cache_dir: Path
     drive_folder_id: str  # "" = scan the entire Drive
     ollama: OllamaConfig
+    perf: PerfConfig = field(default_factory=PerfConfig)
 
 
 def load_config(path: Path | str = "config.toml") -> Config:
@@ -33,6 +51,8 @@ def load_config(path: Path | str = "config.toml") -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
     ollama = raw["ollama"]
+    perf = raw.get("perf", {})
+    cpu = os.cpu_count() or 4
     return Config(
         thumb_size=raw["thumb_size"],
         near_hamming_max=raw["near_hamming_max"],
@@ -47,6 +67,15 @@ def load_config(path: Path | str = "config.toml") -> Config:
             host=ollama["host"],
             model=ollama["model"],
             adjudicate_band_min=ollama["adjudicate_band_min"],
+        ),
+        perf=PerfConfig(
+            fetch_workers=perf.get("fetch_workers", cpu),
+            hash_workers=perf.get("hash_workers", cpu),
+            embed_fetch_workers=perf.get("embed_fetch_workers", cpu),
+            clip_batch=perf.get("clip_batch", 32),
+            db_batch=perf.get("db_batch", 100),
+            adjudicate_workers=perf.get("adjudicate_workers", 3),
+            queue_maxsize=perf.get("queue_maxsize", 4 * cpu),
         ),
     )
 
