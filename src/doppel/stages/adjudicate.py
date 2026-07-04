@@ -136,6 +136,10 @@ def run_adjudicate(
     """Adjudicate borderline pairs. Resumable: pairs already ruled on by the
     current model + prompt version are skipped; bumping the prompt version
     re-adjudicates without clobbering prior results."""
+    # No resume-overlap here: a resumed adjudicate simply re-asks pairs that
+    # still lack a verdict (the `done` filter below). A verdict is validated
+    # JSON, not a downloaded byte stream, so there's nothing to "re-fetch", and
+    # deleting one whose pair is no longer a candidate would silently lose it.
     scan_id = start_scan(conn, "adjudicate")
     try:
         prompt, version = latest_prompt("adjudicate", prompts_dir)

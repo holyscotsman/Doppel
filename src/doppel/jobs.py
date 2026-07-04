@@ -131,6 +131,105 @@ def _invalidate_derived(
             stale.unlink(missing_ok=True)
 
 
+def stage_was_interrupted(conn: sqlite3.Connection, stage: str) -> bool:
+    """True only when this stage's most recent scan was abnormally terminated —
+    a killed/crashed process, whose 'running' row is reconciled to
+    error='interrupted' (start_scan and reconcile_orphaned_scans write exactly
+    that sentinel). A run that failed for a REAL reason (a Drive or VLM error)
+    carries a different error string and is NOT treated as a resume — it should
+    just be retried, not have its recent work thrown away and redone."""
+    row = conn.execute(
+        "SELECT status, error FROM scans WHERE stage = ? ORDER BY id DESC LIMIT 1",
+        (stage,),
+    ).fetchone()
+    return (
+        row is not None and row["status"] == "failed" and row["error"] == "interrupted"
+    )
+
+
+def _drop_cached_thumbs(
+    conn: sqlite3.Connection, ids: list[int], cache_dir: Path | str | None
+) -> None:
+    if not ids or cache_dir is None:
+        return
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT drive_id FROM photos WHERE id IN ({placeholders})",  # noqa: S608
+        ids,
+    ).fetchall()
+    for row in rows:
+        for stale in Path(cache_dir).glob(f"{row['drive_id']}_*"):
+            stale.unlink(missing_ok=True)
+
+
+def reprocess_tail(
+    conn: sqlite3.Connection,
+    stage: str,
+    n: int,
+    cache_dir: Path | str | None = None,
+) -> list[int]:
+    """Invalidate the last `n` finished photos of a resumed stage so they are
+    recomputed from a fresh fetch — cheap insurance against a partial write or
+    truncated *download* at the interruption boundary. Returns the invalidated
+    photo ids.
+
+    near    -> clear phash/dhash + delete cached thumbnail of the highest-id
+               hashed photos (the cache delete is what forces a re-fetch)
+    similar -> delete the highest-id stored embeddings + cached thumbnails
+    Other stages no-op. In particular adjudicate is intentionally excluded:
+    a VLM verdict is schema-validated JSON, not a downloaded byte stream, so it
+    has no truncation-corruption failure mode — and deleting a verdict whose
+    pair is no longer a candidate would silently lose it. Adjudicate resumes
+    safely by simply re-asking pairs that lack a verdict.
+
+    Call once per stage run, immediately before the re-derive step: it selects
+    "highest id that still has output", so calling it twice would walk further
+    back each time. ("Highest id", not literally "last to finish" — near/similar
+    write in completion order, but a torn low-id write is impossible under
+    SQLite atomicity and is caught by the phash IS NULL / NOT IN embeddings
+    resume query anyway.)
+    """
+    if n <= 0:
+        return []
+    if stage == "near":
+        ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM photos WHERE status = 'active' AND phash IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (n,),
+            )
+        ]
+        for pid in ids:
+            conn.execute(
+                "UPDATE photos SET phash = NULL, dhash = NULL, thumb_path = NULL "
+                "WHERE id = ?",
+                (pid,),
+            )
+        _drop_cached_thumbs(conn, ids, cache_dir)
+        conn.commit()
+        return ids
+    if stage == "similar":
+        from doppel.db import ensure_vec_schema
+
+        ensure_vec_schema(conn)
+        ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT p.id FROM photos p WHERE p.status = 'active' "
+                "AND p.id IN (SELECT photo_id FROM embeddings) "
+                "ORDER BY p.id DESC LIMIT ?",
+                (n,),
+            )
+        ]
+        for pid in ids:
+            conn.execute("DELETE FROM embeddings WHERE photo_id = ?", (pid,))
+        _drop_cached_thumbs(conn, ids, cache_dir)
+        conn.commit()
+        return ids
+    return []
+
+
 def _resolve_folder_path(
     client: DriveClient,
     cache: dict[str, tuple[str | None, str | None]],

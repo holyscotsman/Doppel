@@ -7,6 +7,7 @@ clip_model = "ViT-B-32/laion2b_s34b_b79k"
 db_path = "doppel.db"
 cache_dir = "cache"
 drive_folder_id = ""  # empty = scan the entire Drive; set via /setup or paste a folder id
+resume_overlap = 3    # after an interruption, re-check this many recent photos per stage
 
 [ollama]
 host = "http://127.0.0.1:11434"

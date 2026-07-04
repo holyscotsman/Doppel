@@ -9,8 +9,20 @@
     </div>
     {% endif %}
 
+    {% if interrupted_stage and not any_running %}
+    <div class="banner resume-banner">
+      <b>Last scan was interrupted.</b> Your progress was saved — resume to pick
+      up where it stopped. The last few photos are re-checked automatically in
+      case of a bad write at that point.
+      <form hx-post="/scans/all" hx-target="#scan-status" hx-swap="innerHTML"
+            style="margin-top:0.5rem">
+        <button type="submit" class="scan-all-btn">▶ Resume scan</button>
+      </form>
+    </div>
+    {% endif %}
+
     <div class="lib-summary">
-      <div><span class="lib-num">{{ photo_count }}</span> photos</div>
+      <div><span class="lib-num" id="lib-photo-count">{{ photo_count }}</span> photos</div>
       {% if folder_id %}<div class="muted tiny">scoped to a folder</div>{% endif %}
     </div>
 
@@ -21,12 +33,12 @@
          hx-on:click="pickTier(this)"
          style="cursor:pointer">
         <span class="tier-name">{{ label }}</span>
-        <span class="tier-count">{{ tier_counts.get(t, 0) }}</span>
+        <span class="tier-count" id="tier-count-{{ t }}">{{ tier_counts.get(t, 0) }}</span>
       </a>
       {% endfor %}
       <a class="tier-link trash-link" href="/trash/confirm">
         <span class="tier-name">🗑 Trash queue{% if reclaim_total %} · {{ reclaim_total | filesizeformat }}{% endif %}</span>
-        <span class="tier-count">{{ trash_count }}</span>
+        <span class="tier-count" id="tier-count-trash">{{ trash_count }}</span>
       </a>
     </nav>
 

@@ -44,6 +44,10 @@ class Config:
     drive_folder_id: str  # "" = scan the entire Drive
     ollama: OllamaConfig
     perf: PerfConfig = field(default_factory=PerfConfig)
+    # when a stage resumes after an interruption, re-do this many of the most
+    # recently finished photos — cheap insurance against a half-written result
+    # or a truncated fetch right at the point of the crash.
+    resume_overlap: int = 3
 
 
 def load_config(path: Path | str = "config.toml") -> Config:
@@ -77,6 +81,7 @@ def load_config(path: Path | str = "config.toml") -> Config:
             adjudicate_workers=perf.get("adjudicate_workers", 3),
             queue_maxsize=perf.get("queue_maxsize", 4 * cpu),
         ),
+        resume_overlap=raw.get("resume_overlap", 3),
     )
 
 

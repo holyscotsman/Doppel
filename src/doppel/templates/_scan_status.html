@@ -1,3 +1,12 @@
+{% if oob %}
+{# live counts pushed out-of-band on each 2s poll, so results the scan is
+   finding appear in the left nav in real time without a page reload #}
+<span class="lib-num" id="lib-photo-count" hx-swap-oob="true">{{ photo_count }}</span>
+{% for t in ["exact", "near", "similar", "vlm"] %}
+<span class="tier-count" id="tier-count-{{ t }}" hx-swap-oob="true">{{ tier_counts.get(t, 0) }}</span>
+{% endfor %}
+<span class="tier-count" id="tier-count-trash" hx-swap-oob="true">{{ trash_count }}</span>
+{% endif %}
 <div class="scan-controls">
   <button hx-post="/scans/all" hx-target="#scan-status" class="scan-all-btn"
           {% if any_running %}disabled{% endif %}>

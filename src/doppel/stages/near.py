@@ -22,7 +22,14 @@ from PIL import Image
 
 from doppel.config import Config
 from doppel.drive import ImageFetcher
-from doppel.jobs import fail_scan, finish_scan, now, start_scan
+from doppel.jobs import (
+    fail_scan,
+    finish_scan,
+    now,
+    reprocess_tail,
+    stage_was_interrupted,
+    start_scan,
+)
 from doppel.stages.exact import rebuild_groups
 from doppel.stages.grouping import UnionFind
 from doppel.stages.parallel import DbWriter, parallel_map
@@ -162,8 +169,13 @@ def _is_color_variant(
 
 def run_near(conn: sqlite3.Connection, fetcher: ImageFetcher, config: Config) -> int:
     """Hash, pair, confirm, group. Returns the scans row id."""
+    resuming = stage_was_interrupted(conn, "near")
     scan_id = start_scan(conn, "near")
     try:
+        if resuming:
+            # re-hash the last few from a fresh fetch, in case the crash left a
+            # partial write or truncated thumbnail at that boundary
+            reprocess_tail(conn, "near", config.resume_overlap, config.cache_dir)
         n_hashed = _hash_missing(conn, fetcher, config, scan_id)
 
         rows = conn.execute(

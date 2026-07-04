@@ -515,6 +515,9 @@ class DriveImageFetcher:
         import sqlite3
 
         assert column in ("thumbnail_link", "thumb_path")
+        # sqlite3.connect's default timeout=5.0 sets busy_timeout=5000ms, so this
+        # short-lived write waits (not errors) if a scan's writer holds the WAL
+        # lock — concurrent fetch-during-scan is safe without extra pragmas.
         conn = sqlite3.connect(self._db_path)
         try:
             conn.execute(

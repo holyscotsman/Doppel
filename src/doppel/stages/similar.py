@@ -17,7 +17,14 @@ from doppel.config import Config
 from doppel.db import ensure_vec_schema
 from doppel.drive import ImageFetcher
 from doppel.embed import BATCH_SIZE, Embedder
-from doppel.jobs import fail_scan, finish_scan, now, start_scan
+from doppel.jobs import (
+    fail_scan,
+    finish_scan,
+    now,
+    reprocess_tail,
+    stage_was_interrupted,
+    start_scan,
+)
 from doppel.stages.exact import rebuild_groups
 from doppel.stages.grouping import UnionFind
 from doppel.stages.parallel import DbWriter, parallel_map
@@ -173,10 +180,14 @@ def run_similar(
     config: Config,
 ) -> int:
     """Embed, pair, cluster; drop clusters adding nothing over exact/near."""
+    resuming = stage_was_interrupted(conn, "similar")
     scan_id = start_scan(conn, "similar")
     try:
         ensure_vec_schema(conn)
         _ensure_embedding_space(conn, config)
+        if resuming:
+            # re-embed the last few from a fresh fetch (crash-boundary safety)
+            reprocess_tail(conn, "similar", config.resume_overlap, config.cache_dir)
         n_embedded = _embed_missing(conn, fetcher, embedder, config, scan_id)
 
         vectors = load_vectors(conn)

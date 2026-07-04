@@ -1002,6 +1002,17 @@ def create_app(
             "SELECT finished_at FROM scans WHERE stage = 'sync' AND status = 'done' "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        # a stage is "left interrupted" only if its MOST RECENT scan failed as
+        # interrupted (a later clean run clears it) — that's when we offer resume
+        interrupted = conn.execute(
+            """
+            SELECT s.stage FROM scans s
+            JOIN (SELECT stage, MAX(id) AS mx FROM scans GROUP BY stage) latest
+              ON latest.stage = s.stage AND latest.mx = s.id
+            WHERE s.status = 'failed' AND s.error = 'interrupted'
+            LIMIT 1
+            """
+        ).fetchone()
         return {
             "photo_count": photo_count,
             "tier_counts": tier_counts,
@@ -1013,6 +1024,7 @@ def create_app(
             "folder_id": config.drive_folder_id,
             "daily_enabled": get_meta(conn, "daily_scan", "off") == "on",
             "last_full_scan": last_full["finished_at"] if last_full else None,
+            "interrupted_stage": interrupted["stage"] if interrupted else None,
         }
 
     def _review_pane_ctx(
@@ -1118,14 +1130,12 @@ def create_app(
 
     @app.get("/partials/scans", response_class=HTMLResponse)
     def scans_partial(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-        return templates.TemplateResponse(
-            request,
-            "_scan_status.html",
-            {
-                "scans": scan_overview(conn),
-                "any_running": app.state.runner.running_stage() is not None,
-            },
-        )
+        # reuse the whole left-pane context so the 2s poll can also push live
+        # library/tier/trash counts out-of-band (oob=True) — results the scan
+        # is finding show up in the nav in real time
+        ctx = _left_pane_ctx(conn)
+        ctx["oob"] = True
+        return templates.TemplateResponse(request, "_scan_status.html", ctx)
 
     @app.post("/scans/{stage}", response_class=HTMLResponse)
     def start_stage(
@@ -1495,7 +1505,12 @@ def create_app(
             )
         }
         if not member_ids:
-            raise HTTPException(status_code=404, detail="no such group")
+            # a concurrent scan rebuilt this tier between loading the card and
+            # saving — degrade to the same graceful placeholder as a post-write
+            # disappearance, rather than a raw 404
+            if request.headers.get("HX-Request"):
+                return _group_card_response(request, conn, group_id)
+            return RedirectResponse(url="/review?tier=exact", status_code=303)
         form = await request.form()
         for key, action in form.items():
             if not key.startswith("action_"):
@@ -1540,7 +1555,9 @@ def create_app(
             )
         ]
         if not member_ids:
-            raise HTTPException(status_code=404, detail="no such group")
+            # group gone (e.g. a concurrent scan rebuilt the tier) — the same
+            # graceful placeholder the card falls back to elsewhere
+            return _group_card_response(request, conn, group_id)
         for pid in member_ids:
             conn.execute(
                 """

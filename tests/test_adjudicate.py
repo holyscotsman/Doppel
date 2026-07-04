@@ -210,8 +210,11 @@ def test_interrupt_mid_batch_resumes(conn, config, fetcher, prompts_dir) -> None
             return super().chat_json(prompt, images, schema)
 
     vlm = InterruptingVlm([{"verdict": "near", "reason": "first pair"}] * 3)
-    # serial so "interrupt on the 2nd pair, exactly 1 stored" is deterministic
-    serial = dataclasses.replace(config, perf=PerfConfig(adjudicate_workers=1))
+    # serial so "interrupt on the 2nd pair, exactly 1 stored" is deterministic;
+    # overlap 0 to isolate skip-resume from the redo-last-few safety
+    serial = dataclasses.replace(
+        config, perf=PerfConfig(adjudicate_workers=1), resume_overlap=0
+    )
     with pytest.raises(KeyboardInterrupt):
         run_adjudicate(conn, fetcher, vlm, serial, prompts_dir=prompts_dir)
 

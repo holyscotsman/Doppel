@@ -165,7 +165,7 @@ def test_dashboard_shows_exact_group_count(client, config) -> None:
 
     resp = client.get("/")
     # exactly one exact group: the Exact tier badge in the left nav reads 1
-    assert '<span class="tier-count">1</span>' in resp.text
+    assert '<span class="tier-count" id="tier-count-exact">1</span>' in resp.text
 
 
 def test_stage_error_is_delivered_out_of_band(client, monkeypatch, tmp_path) -> None:
@@ -382,6 +382,43 @@ def test_scan_is_due_logic():
     assert scan_is_due(True, None, now) is True  # enabled, never scanned
     assert scan_is_due(True, now - timedelta(hours=25), now) is True  # stale
     assert scan_is_due(True, now - timedelta(hours=2), now) is False  # recent
+
+
+def test_scans_partial_pushes_live_counts(client, config):
+    seed_duplicates(config)
+    run_exact_via_ui(client)
+    resp = client.get("/partials/scans")
+    assert resp.status_code == 200
+    # the 2s poll carries out-of-band count spans so the left nav updates in
+    # real time as the scan finds groups — no page reload needed
+    assert 'id="tier-count-exact" hx-swap-oob="true"' in resp.text
+    assert 'id="lib-photo-count" hx-swap-oob="true"' in resp.text
+
+
+def test_resume_banner_after_interruption_and_cleared_by_clean_run(client, config):
+    from doppel.jobs import now
+
+    conn = connect(config.db_path)
+    conn.execute(
+        "INSERT INTO scans (stage, status, error, processed, started_at) "
+        "VALUES ('near', 'failed', 'interrupted', 5, ?)",
+        (now(),),
+    )
+    conn.commit()
+    conn.close()
+    page = client.get("/").text
+    assert "Last scan was interrupted" in page and "Resume scan" in page
+
+    # a later successful run of that stage supersedes it -> banner gone
+    conn = connect(config.db_path)
+    conn.execute(
+        "INSERT INTO scans (stage, status, processed, total, started_at, finished_at) "
+        "VALUES ('near', 'done', 5, 5, ?, ?)",
+        (now(), now()),
+    )
+    conn.commit()
+    conn.close()
+    assert "Last scan was interrupted" not in client.get("/").text
 
 
 def test_daily_scan_toggle_persists(client, config):
