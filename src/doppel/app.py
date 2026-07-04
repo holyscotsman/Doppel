@@ -934,6 +934,20 @@ def create_app(
             "verdicts": verdicts,
         }
 
+    def _group_card_response(
+        request: Request, conn: sqlite3.Connection, group_id: int
+    ) -> HTMLResponse:
+        """Render a group card, or a graceful placeholder if the group vanished
+        (a concurrent scan rebuild can delete it between the write and here)."""
+        ctx = _group_context(conn, group_id)
+        if ctx is None:
+            return HTMLResponse(
+                f'<div class="review-group" id="group-{group_id}">'
+                '<p class="muted">This group changed during a scan — '
+                "reload to see the latest.</p></div>"
+            )
+        return templates.TemplateResponse(request, "_group_card.html", {"g": ctx})
+
     def _review_page_ids(
         conn: sqlite3.Connection, tier: str, reviewed: str, page: int
     ) -> tuple[list[int], int, dict]:
@@ -1209,9 +1223,7 @@ def create_app(
         # htmx (the one-page review) swaps the updated card in place; a plain
         # form submit (the standalone detail page) redirects as before
         if request.headers.get("HX-Request"):
-            return templates.TemplateResponse(
-                request, "_group_card.html", {"g": _group_context(conn, group_id)}
-            )
+            return _group_card_response(request, conn, group_id)
         return RedirectResponse(url=f"/groups/{group_id}", status_code=303)
 
     @app.post("/groups/{group_id}/keep", response_class=HTMLResponse)
@@ -1240,9 +1252,7 @@ def create_app(
                 (pid, now()),
             )
         conn.commit()
-        return templates.TemplateResponse(
-            request, "_group_card.html", {"g": _group_context(conn, group_id)}
-        )
+        return _group_card_response(request, conn, group_id)
 
     @app.post("/review/auto")
     def auto_resolve(
@@ -1250,9 +1260,10 @@ def create_app(
         reviewed: str = "no",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        """Auto-resolve every not-yet-reviewed group in the tier: keep the
-        largest file, trash the rest. Groups you've already reviewed are left
-        untouched."""
+        """Auto-resolve every UNTOUCHED group in the tier: keep the largest
+        file, trash the rest. Any group you've started deciding — even a single
+        keep/trash — is left completely alone, so this never overwrites your
+        manual choices."""
         group_ids = [
             r["id"]
             for r in conn.execute(
@@ -1261,7 +1272,7 @@ def create_app(
                 JOIN group_members m ON m.group_id = g.id
                 LEFT JOIN decisions d ON d.photo_id = m.photo_id
                 WHERE g.tier = ?
-                GROUP BY g.id HAVING COUNT(d.photo_id) < COUNT(m.photo_id)
+                GROUP BY g.id HAVING COUNT(d.photo_id) = 0
                 """,
                 (tier,),
             )

@@ -153,6 +153,52 @@ def test_auto_resolve_keeps_largest_in_unreviewed(client, config):
     assert acts[g2_rows[1]["id"]] == "trash"
 
 
+def test_auto_resolve_never_clobbers_partial_manual_choices(client, config):
+    """A group the user has started (even one decision) must be left alone —
+    auto-resolve only touches fully-untouched groups."""
+    conn = connect(config.db_path)
+    gid = make_exact_group(conn, "a", [9000, 100, 50])  # big, small, tiny
+    big, small, tiny = photo_ids(conn, gid)
+    conn.close()
+    # deliberately keep the SMALL one, trash the big; leave tiny undecided
+    client.post(
+        f"/groups/{gid}/decisions",
+        data={f"action_{small}": "keep", f"action_{big}": "trash"},
+    )
+
+    client.post("/review/auto", params={"tier": "exact"}, follow_redirects=False)
+
+    conn = connect(config.db_path)
+    acts = {
+        r["photo_id"]: r["action"]
+        for r in conn.execute("SELECT photo_id, action FROM decisions")
+    }
+    conn.close()
+    # the manual choices survive; the partially-decided group is untouched
+    assert acts[small] == "keep"
+    assert acts[big] == "trash"
+    assert tiny not in acts  # still undecided, not force-trashed
+
+
+def test_keep_group_survives_missing_group_row(client, config):
+    """If the group is gone (e.g. a scan rebuilt it mid-request), respond
+    gracefully instead of 500ing."""
+    conn = connect(config.db_path)
+    pid = insert_photo(conn, "x", md5="m")
+    # a member row whose group row is gone — the transient state a rebuild
+    # leaves between reading members and re-rendering (FK off to construct it)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO group_members (group_id, photo_id) VALUES (999, ?)", (pid,)
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.post("/groups/999/keep")
+    assert resp.status_code == 200  # graceful placeholder, not a crash
+    assert "changed during a scan" in resp.text
+
+
 def test_reviewed_filter_and_space_reclaimable(client, config):
     conn = connect(config.db_path)
     gid = make_exact_group(conn, "a", [2000, 500])
