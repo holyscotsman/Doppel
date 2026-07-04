@@ -1,8 +1,10 @@
+import dataclasses
 import json
 
 import numpy as np
 import pytest
 
+from doppel.config import PerfConfig
 from doppel.db import ensure_vec_schema
 from doppel.jobs import now
 from doppel.stages.adjudicate import run_adjudicate
@@ -208,8 +210,10 @@ def test_interrupt_mid_batch_resumes(conn, config, fetcher, prompts_dir) -> None
             return super().chat_json(prompt, images, schema)
 
     vlm = InterruptingVlm([{"verdict": "near", "reason": "first pair"}] * 3)
+    # serial so "interrupt on the 2nd pair, exactly 1 stored" is deterministic
+    serial = dataclasses.replace(config, perf=PerfConfig(adjudicate_workers=1))
     with pytest.raises(KeyboardInterrupt):
-        run_adjudicate(conn, fetcher, vlm, config, prompts_dir=prompts_dir)
+        run_adjudicate(conn, fetcher, vlm, serial, prompts_dir=prompts_dir)
 
     assert conn.execute("SELECT COUNT(*) AS n FROM vlm_results").fetchone()["n"] == 1
     scan = conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
@@ -218,6 +222,42 @@ def test_interrupt_mid_batch_resumes(conn, config, fetcher, prompts_dir) -> None
     # candidates are (a,b) at 0.90 and (a,c) at 0.88 — pair (b,c) falls
     # below the band. Resume handles only the one remaining pair.
     resumed = FakeVlm([{"verdict": "near", "reason": "second"}])
-    run_adjudicate(conn, fetcher, resumed, config, prompts_dir=prompts_dir)
+    run_adjudicate(conn, fetcher, resumed, serial, prompts_dir=prompts_dir)
     assert len(resumed.calls) == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM vlm_results").fetchone()["n"] == 2
+
+
+def test_parallel_adjudication_rules_every_pair(conn, config, fetcher, prompts_dir):
+    """A 3-member color-variant group is 3 pairs; adjudicating them across
+    several workers must store all three verdicts and group correctly —
+    union-find is order-independent, so concurrency can't change the outcome."""
+    ids = [
+        insert_photo(conn, name, name=f"{name}.jpg", md5=f"m{name}")
+        for name in ("red", "green", "blue")
+    ]
+    cur = conn.execute(
+        "INSERT INTO groups (tier, color_variant, created_at) VALUES ('near', 1, ?)",
+        (now(),),
+    )
+    gid = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO group_members (group_id, photo_id) VALUES (?, ?)",
+        [(gid, pid) for pid in ids],
+    )
+    conn.commit()
+
+    # every pair comes back "variant"; force real concurrency + a small db_batch
+    vlm = FakeVlm([{"verdict": "variant", "reason": "same shot, recolored"}] * 3)
+    parallel = dataclasses.replace(
+        config, perf=PerfConfig(adjudicate_workers=3, db_batch=2, queue_maxsize=4)
+    )
+    run_adjudicate(conn, fetcher, vlm, parallel, prompts_dir=prompts_dir)
+
+    assert len(vlm.calls) == 3  # all three pairs adjudicated
+    assert conn.execute("SELECT COUNT(*) AS n FROM vlm_results").fetchone()["n"] == 3
+    # the three recolors collapse into one vlm group, flagged color_variant
+    assert vlm_groups(conn) == [
+        {"members": {"red", "green", "blue"}, "color_variant": 1}
+    ]
+    scan = conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+    assert scan["status"] == "done" and scan["processed"] == 3

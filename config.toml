@@ -17,10 +17,10 @@ adjudicate_band_min = 0.85   # pairs in [this, similar_cosine_min) go to the VLM
 # to your CPU core count when omitted, so you usually don't need this section —
 # raise the numbers to go faster on a big machine, lower them to leave headroom.
 [perf]
+clip_batch = 64            # images per GPU pass when embedding; 64 suits 24GB+
 # fetch_workers = 10       # parallel thumbnail downloads (I/O bound)
 # hash_workers = 10        # parallel fetch + pHash/dHash in the near stage
 # embed_fetch_workers = 10 # prefetch threads feeding the CLIP batcher
-# clip_batch = 32          # images per GPU pass when embedding (try 64 on 24GB+)
 # db_batch = 100           # rows per sqlite transaction from the single writer
 # adjudicate_workers = 3   # fetch + VLM threads (Ollama is one local server)
 # queue_maxsize = 40       # bounded worker->writer handoff depth

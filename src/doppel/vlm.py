@@ -27,22 +27,28 @@ class VlmClient(Protocol):
 class OllamaClient:
     """Real client for a local Ollama server.
 
-    One request is in flight at a time by construction: all VLM work runs
-    on the single JobRunner worker thread. The model must be vision-capable
-    and, for adjudication, accept multiple images per prompt (qwen3-vl,
-    gemma3 — llama3.2-vision cannot compare a pair).
+    The adjudicate stage may issue a few requests concurrently (perf.
+    adjudicate_workers); the underlying ollama/httpx client is safe for
+    concurrent use, and only the one-time client construction is locked. The
+    model must be vision-capable and, for adjudication, accept multiple images
+    per prompt (qwen3-vl, gemma3 — llama3.2-vision cannot compare a pair).
     """
 
     def __init__(self, host: str, model: str) -> None:
+        import threading
+
         self.host = host
         self.model = model
         self._client: Any = None
+        self._client_lock = threading.Lock()
 
     def _get_client(self) -> Any:
         if self._client is None:
-            import ollama
+            with self._client_lock:
+                if self._client is None:
+                    import ollama
 
-            self._client = ollama.Client(host=self.host)
+                    self._client = ollama.Client(host=self.host)
         return self._client
 
     def chat_json(

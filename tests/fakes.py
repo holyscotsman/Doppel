@@ -252,14 +252,21 @@ class FakeEmbedder:
 
 
 class FakeVlm:
-    """Returns canned JSON responses in order; records every call."""
+    """Returns canned JSON responses in order; records every call. Thread-safe
+    so it can stand in for the real client under parallel adjudication."""
 
     def __init__(self, responses: list[dict] | None = None) -> None:
+        import threading
+
         self.queue = list(responses or [])
         self.calls: list[dict] = []
+        self._lock = threading.Lock()
 
     def chat_json(self, prompt: str, images: list, schema: dict) -> dict:
-        self.calls.append({"prompt": prompt, "n_images": len(images), "schema": schema})
-        if not self.queue:
-            raise AssertionError("unexpected VLM call")
-        return self.queue.pop(0)
+        with self._lock:
+            self.calls.append(
+                {"prompt": prompt, "n_images": len(images), "schema": schema}
+            )
+            if not self.queue:
+                raise AssertionError("unexpected VLM call")
+            return self.queue.pop(0)

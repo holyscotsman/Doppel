@@ -22,6 +22,7 @@ from doppel.drive import ImageFetcher
 from doppel.jobs import fail_scan, finish_scan, now, start_scan
 from doppel.stages.exact import rebuild_groups
 from doppel.stages.grouping import UnionFind
+from doppel.stages.parallel import DbWriter, parallel_map
 from doppel.stages.similar import K_NEIGHBORS, load_vectors
 from doppel.vlm import PROMPTS_DIR, VlmClient, latest_prompt
 
@@ -156,24 +157,40 @@ def run_adjudicate(
             row["id"]: row["drive_id"]
             for row in conn.execute("SELECT id, drive_id FROM photos")
         }
-        for i, (a, b) in enumerate(todo, start=1):
+
+        def adjudicate_pair(pair: tuple[int, int]) -> dict:
+            a, b = pair
             image_a = fetcher.get(drive_ids[a], config.thumb_size).read_bytes()
             image_b = fetcher.get(drive_ids[b], config.thumb_size).read_bytes()
-            result = vlm.chat_json(prompt, [image_a, image_b], ADJUDICATE_SCHEMA)
-            verdict = result.get("verdict")
-            if verdict not in (*GROUPING_VERDICTS, "different"):
-                verdict = None  # schema should prevent this; stay honest
-            conn.execute(
-                """
-                INSERT INTO vlm_results
-                  (task, photo_id, photo_id_b, model, prompt_version,
-                   response, verdict, created_at)
-                VALUES ('adjudicate', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (a, b, model, version, json.dumps(result), verdict, now()),
-            )
-            conn.execute("UPDATE scans SET processed = ? WHERE id = ?", (i, scan_id))
-            conn.commit()  # per-pair commit: interrupt-safe resume
+            return vlm.chat_json(prompt, [image_a, image_b], ADJUDICATE_SCHEMA)
+
+        # Fetch + VLM run across perf.adjudicate_workers threads (kept low —
+        # Ollama is one local server); a single DbWriter owns every insert. A
+        # pair whose fetch/VLM raises is left un-ruled and retried next run.
+        perf = config.perf
+        processed = 0
+        with DbWriter(conn, perf.db_batch, perf.queue_maxsize) as writer:
+            for (a, b), result in parallel_map(
+                adjudicate_pair, todo, perf.adjudicate_workers
+            ):
+                processed += 1
+                if isinstance(result, Exception):
+                    raise result  # fail the scan: an interrupt/VLM error is real
+                verdict = result.get("verdict")
+                if verdict not in (*GROUPING_VERDICTS, "different"):
+                    verdict = None  # schema should prevent this; stay honest
+                writer.put(
+                    """
+                    INSERT INTO vlm_results
+                      (task, photo_id, photo_id_b, model, prompt_version,
+                       response, verdict, created_at)
+                    VALUES ('adjudicate', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (a, b, model, version, json.dumps(result), verdict, now()),
+                )
+                writer.put(
+                    "UPDATE scans SET processed = ? WHERE id = ?", (processed, scan_id)
+                )
 
         _rebuild_vlm_groups(conn, model, version)
         conn.commit()
