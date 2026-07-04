@@ -430,6 +430,17 @@ def create_app(
             ).fetchone()
             scan = dict(row) if row else None
             elapsed, eta = _scan_timing(scan)
+            state = scan["status"] if scan else "idle"
+            # 0-1 fill for the progress ring; None while a running stage has no
+            # known total yet (the ring shows an indeterminate spinner instead).
+            if state == "done":
+                fraction: float | None = 1.0
+            elif state == "running" and scan and scan["total"]:
+                fraction = min(1.0, scan["processed"] / scan["total"])
+            elif state == "running":
+                fraction = None
+            else:
+                fraction = 0.0
             overview.append(
                 {
                     "stage": stage,
@@ -437,6 +448,9 @@ def create_app(
                     "scan": scan,
                     "elapsed": elapsed,
                     "eta": eta,
+                    "state": state,
+                    "fraction": fraction,
+                    "pct": None if fraction is None else round(fraction * 100),
                 }
             )
         return overview

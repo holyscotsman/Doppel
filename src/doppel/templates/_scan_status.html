@@ -4,43 +4,68 @@
     {% if any_running %}⏳ Scanning…{% else %}▶ Run full scan{% endif %}
   </button>
   <span class="muted">Finds your photos, then groups exact, near, and similar
-    duplicates. Watch it below.</span>
+    duplicates. Watch the rings fill as each stage runs.</span>
 </div>
 
-<table class="scan-table">
+{% set circ = 326.726 %}
+<div class="rings">
+  {% for item in scans %}
+  {% set s = item.scan %}
+  <div class="ring ring--{{ item.state }}{% if item.fraction is none %} ring--indeterminate{% endif %}"
+       style="--i: {{ loop.index0 }}">
+    <div class="ring-disc">
+      <div class="ring-3d">
+        <svg class="ring-svg" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="ring-track" cx="60" cy="60" r="52"></circle>
+          {% if item.fraction is not none %}
+          <circle class="ring-fill" cx="60" cy="60" r="52"
+                  transform="rotate(-90 60 60)"
+                  stroke-dasharray="{{ circ }}"
+                  stroke-dashoffset="{{ circ * (1 - item.fraction) }}"></circle>
+          {% else %}
+          <circle class="ring-spin" cx="60" cy="60" r="52"
+                  stroke-dasharray="{{ (circ * 0.25) | round(2) }} {{ circ }}">
+            <animateTransform attributeName="transform" type="rotate"
+                from="0 60 60" to="360 60 60" dur="1.1s" repeatCount="indefinite"/>
+          </circle>
+          {% endif %}
+        </svg>
+      </div>
+      <div class="ring-pct">
+        {% if item.state == 'done' %}<span class="ring-check">✓</span>
+        {% elif item.state == 'failed' %}<span class="ring-x">!</span>
+        {% elif item.pct is not none %}{{ item.pct }}<span class="ring-unit">%</span>
+        {% elif item.state == 'running' %}<span class="ring-dots">•••</span>
+        {% else %}<span class="ring-idle">—</span>{% endif %}
+      </div>
+    </div>
+    <div class="ring-name">{{ item.label }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="stage-details">
   {% for item in scans %}
   {% set s = item.scan %}
   {% set live = s and s.status == 'running' %}
-  <tr class="{{ 'live-row' if live else '' }}">
-    <td class="stage-label">{{ item.label }}</td>
-    <td class="stage-status">
-      {% if live %}<span class="dot-live"></span>&nbsp;working
-      {% elif s and s.status == 'done' %}<span class="ok-tick">✓ done</span>
+  <div class="stage-detail {{ 'live-row' if live else '' }}">
+    <span class="stage-label">{{ item.label }}</span>
+    <span class="stage-status">
+      {% if live %}<span class="dot-live"></span>&nbsp;working{% if s.total %} · {{ s.processed }} / {{ s.total }}{% endif %}
+      {% elif s and s.status == 'done' %}<span class="ok-tick">✓ done{% if s.total %} · {{ s.total }}{% endif %}</span>
       {% elif s and s.status == 'failed' %}<span class="error">failed</span>
       {% else %}<span class="muted">not run yet</span>{% endif %}
-    </td>
-    <td class="stage-prog">
-      {% if s %}
-        {% if live and s.total %}
-          <div class="progress"><div style="width: {{ (100 * s.processed / s.total) | round }}%"></div></div>
-        {% endif %}
-        {% if live or (s.status == 'done' and s.total) %}
-          <span class="muted">{{ s.processed }}{% if s.total is not none %} / {{ s.total }}{% endif %}</span>
-        {% endif %}
-        {% if live %}
-          <span class="muted timing">{{ item.elapsed }} elapsed{% if item.eta %} · ~{{ item.eta }} left{% endif %}</span>
-        {% elif s.status == 'done' and item.elapsed %}
-          <span class="muted timing">took {{ item.elapsed }}</span>
-        {% endif %}
-        {% if s.status == 'failed' and s.error %}<div class="error">{{ s.error }}</div>{% endif %}
+      {% if live %}
+        <span class="muted timing">{{ item.elapsed }} elapsed{% if item.eta %} · ~{{ item.eta }} left{% endif %}</span>
+      {% elif s and s.status == 'done' and item.elapsed %}
+        <span class="muted timing">took {{ item.elapsed }}</span>
       {% endif %}
-    </td>
-    <td class="stage-run">
-      <button hx-post="/scans/{{ item.stage }}" hx-target="#scan-status" class="mini-btn"
-              {% if any_running %}disabled{% endif %}>run</button>
-    </td>
-  </tr>
+      {% if s and s.status == 'failed' and s.error %}<span class="error timing">{{ s.error }}</span>{% endif %}
+    </span>
+    <button hx-post="/scans/{{ item.stage }}" hx-target="#scan-status" class="mini-btn"
+            {% if any_running %}disabled{% endif %}>run</button>
+  </div>
   {% endfor %}
-</table>
+</div>
 <p class="muted" style="font-size:0.82rem; margin-top:0.5rem">The AI double-check
-  is optional — run it from the button above after the main scan.</p>
+  is optional — run it from its row above after the main scan.</p>
