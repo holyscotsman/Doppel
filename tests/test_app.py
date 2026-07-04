@@ -321,3 +321,52 @@ def test_full_scan_requires_drive_connected(client, monkeypatch, tmp_path) -> No
     resp = client.post("/scans/all")
     assert resp.status_code == 200
     assert "not connected" in resp.text
+
+
+def test_scan_timing_helper():
+    from datetime import UTC, datetime, timedelta
+
+    from doppel.app import _scan_timing
+
+    started = (datetime.now(UTC) - timedelta(seconds=60)).isoformat(timespec="seconds")
+    running = {
+        "started_at": started,
+        "finished_at": None,
+        "status": "running",
+        "processed": 25,
+        "total": 100,
+    }
+    elapsed, eta = _scan_timing(running)
+    assert elapsed is not None  # ~1m elapsed
+    assert eta is not None  # 25/60s rate -> ~75 left -> a few minutes
+
+    done = {
+        "started_at": started,
+        "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "status": "done",
+        "processed": 100,
+        "total": 100,
+    }
+    e2, eta2 = _scan_timing(done)
+    assert e2 is not None and eta2 is None  # elapsed but no ETA once finished
+
+    assert _scan_timing(None) == (None, None)
+    assert _scan_timing({"started_at": None}) == (None, None)
+
+
+def test_dashboard_shows_elapsed_for_running_scan(client, config):
+    from datetime import UTC, datetime, timedelta
+
+    started = (datetime.now(UTC) - timedelta(seconds=90)).isoformat(timespec="seconds")
+    conn = connect(config.db_path)
+    conn.execute(
+        "INSERT INTO scans (stage, status, processed, total, started_at) "
+        "VALUES ('near', 'running', 30, 120, ?)",
+        (started,),
+    )
+    conn.commit()
+    conn.close()
+
+    page = client.get("/")
+    assert "elapsed" in page.text
+    assert "left" in page.text  # ETA rendered while running

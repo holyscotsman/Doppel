@@ -27,6 +27,11 @@
         {% if live or (s.status == 'done' and s.total) %}
           <span class="muted">{{ s.processed }}{% if s.total is not none %} / {{ s.total }}{% endif %}</span>
         {% endif %}
+        {% if live %}
+          <span class="muted timing">{{ item.elapsed }} elapsed{% if item.eta %} · ~{{ item.eta }} left{% endif %}</span>
+        {% elif s.status == 'done' and item.elapsed %}
+          <span class="muted timing">took {{ item.elapsed }}</span>
+        {% endif %}
         {% if s.status == 'failed' and s.error %}<div class="error">{{ s.error }}</div>{% endif %}
       {% endif %}
     </td>

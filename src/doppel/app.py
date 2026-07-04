@@ -7,6 +7,7 @@ import html
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -76,6 +77,45 @@ REVIEWED_FILTERS = {
     "yes": "HAVING decided = members",
     "no": "HAVING decided < members",
 }
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m"
+
+
+def _scan_timing(scan: dict | None) -> tuple[str | None, str | None]:
+    """(elapsed, eta) as human strings for a scans row. ETA is a rate
+    projection from processed/total and only shown while running."""
+    if not scan or not scan.get("started_at"):
+        return None, None
+    try:
+        started = datetime.fromisoformat(scan["started_at"])
+    except ValueError:
+        return None, None
+    if scan.get("finished_at"):
+        end = datetime.fromisoformat(scan["finished_at"])
+    else:
+        end = datetime.now(UTC)
+    elapsed = (end - started).total_seconds()
+    eta = None
+    if (
+        scan.get("status") == "running"
+        and scan.get("total")
+        and scan.get("processed")
+        and elapsed > 0
+    ):
+        rate = scan["processed"] / elapsed  # items per second
+        remaining = (scan["total"] - scan["processed"]) / rate if rate > 0 else 0
+        if remaining > 0:
+            eta = _fmt_duration(remaining)
+    return _fmt_duration(max(elapsed, 0)), eta
 
 
 def auth_mode() -> str | None:
@@ -299,20 +339,24 @@ def create_app(
             return app.state.vlm
 
     def scan_overview(conn: sqlite3.Connection) -> list[dict]:
-        """Latest scans row per UI stage, with a plain-language label. Which
-        stage is live comes from its scans-row status (works for both a single
-        stage and the chained 'all' pipeline)."""
+        """Latest scans row per UI stage, with a plain-language label, elapsed
+        time, and an ETA for a running stage. Which stage is live comes from
+        its scans-row status (works for a single stage and the 'all' pipeline)."""
         overview = []
         for stage in UI_STAGES:
             row = conn.execute(
                 "SELECT * FROM scans WHERE stage = ? ORDER BY id DESC LIMIT 1",
                 (stage,),
             ).fetchone()
+            scan = dict(row) if row else None
+            elapsed, eta = _scan_timing(scan)
             overview.append(
                 {
                     "stage": stage,
                     "label": STAGE_LABELS[stage],
-                    "scan": dict(row) if row else None,
+                    "scan": scan,
+                    "elapsed": elapsed,
+                    "eta": eta,
                 }
             )
         return overview
