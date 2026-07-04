@@ -89,6 +89,10 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # WAL allows one writer at a time; without a busy timeout a second writer
+    # (e.g. /trash on a request thread while a background scan writes) fails
+    # immediately with "database is locked". Wait a few seconds instead.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn

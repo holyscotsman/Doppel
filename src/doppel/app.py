@@ -233,6 +233,13 @@ def build_trash_credentials() -> object:
     if mode == "service_account":
         return load_service_account_credentials(scopes=DRIVE_WRITE_SCOPES)
     if mode == "oauth":
+        # NOTE: the OAuth flow only ever requests the read-only SCOPES, and
+        # get_credentials loads the token forcing those same scopes — so an
+        # OAuth connection can never satisfy this check today (it fails closed
+        # into TrashNotAuthorized, which is safe). Service-account mode is the
+        # supported trash path. If OAuth trashing is ever wanted, add a
+        # write-scoped consent flow AND load the token with its real granted
+        # scopes, or this check will keep rejecting a genuinely-granted token.
         creds = get_credentials(allow_interactive=False)
         granted = set(getattr(creds, "scopes", None) or [])
         if not granted & set(DRIVE_WRITE_SCOPES):

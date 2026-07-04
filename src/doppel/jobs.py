@@ -172,22 +172,29 @@ def _resolve_folder_paths(conn: sqlite3.Connection, client: DriveClient) -> None
     folders (e.g. the test fake) — best-effort, never raises."""
     if not hasattr(client, "get_folder"):
         return
-    cache: dict[str, tuple[str | None, str | None]] = {}
-    parents = [
-        row["parent_id"]
-        for row in conn.execute(
-            "SELECT DISTINCT parent_id FROM photos "
-            "WHERE status = 'active' AND parent_id IS NOT NULL"
-        )
-    ]
-    for parent_id in parents:
-        path = _resolve_folder_path(client, cache, parent_id)
-        if path is not None:
-            conn.execute(
-                "UPDATE photos SET folder_path = ? WHERE parent_id = ?",
-                (path, parent_id),
+    # Path display is purely cosmetic: it must NEVER fail the inventory sync.
+    # The whole body (not just the per-folder fetch) is guarded — a query error
+    # here, e.g. write contention with a concurrent request, would otherwise
+    # bubble up to fail_scan and mark a good sync failed.
+    try:
+        cache: dict[str, tuple[str | None, str | None]] = {}
+        parents = [
+            row["parent_id"]
+            for row in conn.execute(
+                "SELECT DISTINCT parent_id FROM photos "
+                "WHERE status = 'active' AND parent_id IS NOT NULL"
             )
-    conn.commit()
+        ]
+        for parent_id in parents:
+            path = _resolve_folder_path(client, cache, parent_id)
+            if path is not None:
+                conn.execute(
+                    "UPDATE photos SET folder_path = ? WHERE parent_id = ?",
+                    (path, parent_id),
+                )
+        conn.commit()
+    except Exception:
+        return
 
 
 def run_sync(
