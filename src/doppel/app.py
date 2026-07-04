@@ -119,6 +119,36 @@ def _scan_timing(scan: dict | None) -> tuple[str | None, str | None]:
     return _fmt_duration(max(elapsed, 0)), eta
 
 
+HASH_BITS = 64  # pHash/dHash are 8x8 = 64-bit
+
+
+def group_confidence(tier: str, scores: list) -> float | None:
+    """A 0-1 confidence that a group's members really are duplicates.
+
+    exact = certain (byte-identical). near = from the WORST hash distance to
+    the anchor (0 = identical, up to 64). similar = the WORST cosine to the
+    anchor (already 0-1). vlm/unknown -> None (no numeric score)."""
+    if tier == "exact":
+        return 1.0
+    numeric = [s for s in scores if s is not None]
+    if not numeric:
+        return None
+    if tier == "near":
+        return max(0.0, 1.0 - max(numeric) / HASH_BITS)
+    if tier == "similar":
+        return min(numeric)
+    return None
+
+
+# how to order each tier's groups in the review: most-confident first.
+# confidence is set by the WORST member vs the anchor — for near that's the
+# largest hash distance (max_score), for similar the lowest cosine (min_score).
+REVIEW_ORDER = {
+    "near": "ORDER BY max_score ASC, g.id",  # smallest worst-distance = tightest
+    "similar": "ORDER BY min_score DESC, g.id",  # highest worst-cosine = tightest
+}
+
+
 def scan_is_due(
     enabled: bool,
     last_run: datetime | None,
@@ -495,6 +525,31 @@ def create_app(
         current = get_meta(conn, "daily_scan", "off")
         set_meta(conn, "daily_scan", "off" if current == "on" else "on")
         return RedirectResponse("/", status_code=303)
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(
+        request: Request,
+        saved: int = 0,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            {
+                "review_mode": get_meta(conn, "review_mode", "scroll"),
+                "daily_enabled": get_meta(conn, "daily_scan", "off") == "on",
+                "saved": saved,
+            },
+        )
+
+    @app.post("/settings")
+    async def save_settings(
+        request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    ):
+        form = await request.form()
+        mode = str(form.get("review_mode", "scroll"))
+        set_meta(conn, "review_mode", "all" if mode == "all" else "scroll")
+        return RedirectResponse("/settings?saved=1", status_code=303)
 
     @app.get("/setup", response_class=HTMLResponse)
     def setup(
@@ -932,6 +987,9 @@ def create_app(
             "reviewed": reviewed,
             "reclaim": reclaim,
             "verdicts": verdicts,
+            "confidence": group_confidence(
+                group["tier"], [m["score"] for m in members]
+            ),
         }
 
     def _group_card_response(
@@ -949,15 +1007,22 @@ def create_app(
         return templates.TemplateResponse(request, "_group_card.html", {"g": ctx})
 
     def _review_page_ids(
-        conn: sqlite3.Connection, tier: str, reviewed: str, page: int
+        conn: sqlite3.Connection,
+        tier: str,
+        reviewed: str,
+        page: int,
+        limit: int | None = REVIEW_BATCH,
     ) -> tuple[list[int], int, dict]:
-        """Group ids for a review batch, total group count, and review stats."""
+        """Group ids for a review batch (or all groups when limit is None),
+        the total group count, and review stats. Near/similar are ordered
+        most-confident first; other tiers by id."""
         having = REVIEWED_FILTERS.get(reviewed)
         if having is None:
             raise HTTPException(status_code=422, detail="reviewed must be all|yes|no")
         base_query = f"""
             SELECT g.id, COUNT(m.photo_id) AS members,
-                   COUNT(d.photo_id) AS decided
+                   COUNT(d.photo_id) AS decided,
+                   MIN(m.score) AS min_score, MAX(m.score) AS max_score
             FROM groups g
             JOIN group_members m ON m.group_id = g.id
             LEFT JOIN decisions d ON d.photo_id = m.photo_id
@@ -967,13 +1032,20 @@ def create_app(
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM ({base_query})", (tier,)
         ).fetchone()["n"]
-        ids = [
-            r["id"]
-            for r in conn.execute(
-                f"{base_query} ORDER BY g.id LIMIT ? OFFSET ?",
-                (tier, REVIEW_BATCH, (page - 1) * REVIEW_BATCH),
-            )
-        ]
+        order = REVIEW_ORDER.get(tier, "ORDER BY g.id")
+        if limit is None:
+            ids = [
+                r["id"]
+                for r in conn.execute(f"{base_query} {order}", (tier,))  # noqa: S608
+            ]
+        else:
+            ids = [
+                r["id"]
+                for r in conn.execute(
+                    f"{base_query} {order} LIMIT ? OFFSET ?",  # noqa: S608
+                    (tier, limit, (page - 1) * limit),
+                )
+            ]
         # tier-wide stats (independent of the reviewed filter)
         stats = conn.execute(
             """
@@ -997,7 +1069,10 @@ def create_app(
         reviewed: str = "all",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        ids, total, stats = _review_page_ids(conn, tier, reviewed, 1)
+        all_at_once = get_meta(conn, "review_mode", "scroll") == "all"
+        ids, total, stats = _review_page_ids(
+            conn, tier, reviewed, 1, limit=None if all_at_once else REVIEW_BATCH
+        )
         groups = [_group_context(conn, gid) for gid in ids]
         reclaim_total = conn.execute(
             """
@@ -1012,7 +1087,8 @@ def create_app(
                 "tier": tier,
                 "reviewed": reviewed,
                 "groups": groups,
-                "has_more": total > REVIEW_BATCH,
+                # in all-at-once mode everything is already on the page
+                "has_more": (not all_at_once) and total > REVIEW_BATCH,
                 "next_page": 2,
                 "total": total,
                 "stats": stats,

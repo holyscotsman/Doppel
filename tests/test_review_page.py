@@ -217,3 +217,86 @@ def test_reviewed_filter_and_space_reclaimable(client, config):
     to_review = client.get("/review", params={"tier": "exact", "reviewed": "no"})
     assert "b-0.jpg" in to_review.text  # the undecided group
     assert "a-0.jpg" not in to_review.text  # the reviewed one is hidden
+
+
+def test_group_confidence_helper():
+    from doppel.app import group_confidence
+
+    assert group_confidence("exact", [None, None]) == 1.0  # byte-identical
+    # near: worst hamming of 8 over 64 bits -> ~0.875
+    assert abs(group_confidence("near", [0, 8]) - (1 - 8 / 64)) < 1e-9
+    # similar: worst (min) cosine
+    assert group_confidence("similar", [0.99, 0.93]) == 0.93
+    assert group_confidence("vlm", [None]) is None
+
+
+def make_scored_group(conn, tier, key, scores):
+    """A group in `tier` whose members carry the given scores vs anchor."""
+    cur = conn.execute(
+        "INSERT INTO groups (tier, created_at) VALUES (?, ?)", (tier, now())
+    )
+    gid = cur.lastrowid
+    for i, score in enumerate(scores):
+        pid = insert_photo(conn, f"{tier}-{key}-{i}", md5=f"{tier}{key}{i}", size=1000)
+        conn.execute(
+            "INSERT INTO group_members (group_id, photo_id, score) VALUES (?, ?, ?)",
+            (gid, pid, score),
+        )
+    conn.commit()
+    return gid
+
+
+def test_similar_groups_sorted_by_confidence_desc(client, config):
+    conn = connect(config.db_path)
+    # a weaker group (min cosine 0.93) and a stronger one (min cosine 0.99)
+    weak = make_scored_group(conn, "similar", "weak", [1.0, 0.93])
+    strong = make_scored_group(conn, "similar", "strong", [1.0, 0.99])
+    conn.close()
+
+    page = client.get("/review", params={"tier": "similar"}).text
+    assert "99% match" in page and "93% match" in page
+    # the strongest match sorts to the top
+    assert page.index(f"Group {strong} ·") < page.index(f"Group {weak} ·")
+
+
+def test_near_groups_sorted_by_confidence_desc(client, config):
+    conn = connect(config.db_path)
+    loose = make_scored_group(conn, "near", "loose", [0, 8])  # worst hamming 8 -> 88%
+    tight = make_scored_group(conn, "near", "tight", [0, 1])  # worst 1 -> 98%
+    conn.close()
+
+    page = client.get("/review", params={"tier": "near"}).text
+    # tightest (highest confidence) first
+    assert page.index(f"Group {tight} ·") < page.index(f"Group {loose} ·")
+
+
+def test_review_mode_all_loads_everything(client, config):
+    from doppel.app import REVIEW_BATCH
+
+    conn = connect(config.db_path)
+    for i in range(REVIEW_BATCH + 5):
+        make_exact_group(conn, f"g{i}", [100, 10])
+    conn.close()
+
+    # default (scroll): only the first batch, plus a load-more sentinel
+    scroll = client.get("/review", params={"tier": "exact"})
+    assert "loading more" in scroll.text
+
+    # switch to all-at-once
+    client.post("/settings", data={"review_mode": "all"})
+    everything = client.get("/review", params={"tier": "exact"})
+    assert "loading more" not in everything.text  # no infinite-scroll sentinel
+    # every group is on the page
+    assert everything.text.count('class="review-group') == REVIEW_BATCH + 5
+
+
+def test_settings_toggle_persists(client, config):
+    from doppel.db import connect as db_connect
+    from doppel.db import get_meta
+
+    resp = client.post("/settings", data={"review_mode": "all"}, follow_redirects=False)
+    assert resp.status_code == 303
+    conn = db_connect(config.db_path)
+    assert get_meta(conn, "review_mode") == "all"
+    conn.close()
+    assert "All at once" in client.get("/settings").text

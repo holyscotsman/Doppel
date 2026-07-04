@@ -1,6 +1,9 @@
 <div class="review-group{% if g.reviewed %} reviewed{% endif %}" id="group-{{ g.group.id }}">
   <div class="rg-head">
     <span class="rg-title">Group {{ g.group.id }} · {{ g.members | length }} photos</span>
+    {% if g.confidence is not none and g.group.tier in ('near', 'similar') %}
+    <span class="badge conf-badge">{{ (g.confidence * 100) | round | int }}% match</span>
+    {% endif %}
     {% if g.group.color_variant %}<span class="badge">color variant</span>{% endif %}
     {% if g.reviewed %}<span class="badge badge-ok">reviewed</span>{% endif %}
     <span class="rg-actions">

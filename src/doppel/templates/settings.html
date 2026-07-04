@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}settings — doppel{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+{% if saved %}<p class="ok">✓ Saved.</p>{% endif %}
+
+<div class="setup-step">
+  <h3>Review page loading</h3>
+  <p class="muted">When a tier has a lot of duplicate groups, choose how the
+    review page loads them.</p>
+  <form method="post" action="/settings" class="settings-form">
+    <label class="radio-row">
+      <input type="radio" name="review_mode" value="scroll"
+             {% if review_mode != 'all' %}checked{% endif %}>
+      <span><strong>Continuous scrolling</strong> — load more groups as you scroll
+        (lighter, best for very large libraries).</span>
+    </label>
+    <label class="radio-row">
+      <input type="radio" name="review_mode" value="all"
+             {% if review_mode == 'all' %}checked{% endif %}>
+      <span><strong>All at once</strong> — load every group on the page when you open
+        it (heavier, but everything's there to scroll and Ctrl-F).</span>
+    </label>
+    <button type="submit">save</button>
+  </form>
+</div>
+
+<div class="setup-step">
+  <h3>Daily automatic scan
+    {% if daily_enabled %}<span class="badge badge-ok">on</span>{% endif %}
+  </h3>
+  <p class="muted">Toggle the once-a-day full scan from the
+    <a href="/">dashboard</a>. It’s currently
+    <strong>{{ 'on' if daily_enabled else 'off' }}</strong>.</p>
+</div>
+
+<p><a href="/">&larr; back to dashboard</a></p>
+{% endblock %}
