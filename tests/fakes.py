@@ -90,6 +90,20 @@ class FakeDriveClient:
         ]
         return {"files": children}
 
+    def get_folder(self, folder_id: str) -> dict[str, Any]:
+        """Resolve a folder's name + parent from the `folders` map. A folder id
+        that appears only as a parent (a root) resolves with no parent; an
+        unknown id raises, as the real client does for unreachable folders."""
+        known = set(self.folders) | set(self.folders.values())
+        if folder_id not in known:
+            raise ValueError(f"unknown folder {folder_id}")
+        parent = self.folders.get(folder_id)
+        return {
+            "id": folder_id,
+            "name": folder_id,
+            "parents": [parent] if parent else [],
+        }
+
 
 class FakeResponse:
     def __init__(self, status_code: int, content: bytes = b"") -> None:
@@ -174,15 +188,28 @@ def insert_photo(
     thumbnail_link: str | None = None,
     width: int | None = 800,
     height: int | None = 600,
+    parent_id: str | None = None,
+    folder_path: str | None = None,
 ) -> int:
     """Insert a photos row directly (bypassing sync) and return its id."""
     cur = conn.execute(
         """
         INSERT INTO photos (drive_id, name, mime_type, size, md5, width, height,
-                            thumbnail_link, status)
-        VALUES (?, ?, 'image/jpeg', ?, ?, ?, ?, ?, ?)
+                            thumbnail_link, parent_id, folder_path, status)
+        VALUES (?, ?, 'image/jpeg', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (drive_id, name, size, md5, width, height, thumbnail_link, status),
+        (
+            drive_id,
+            name,
+            size,
+            md5,
+            width,
+            height,
+            thumbnail_link,
+            parent_id,
+            folder_path,
+            status,
+        ),
     )
     conn.commit()
     return int(cur.lastrowid)

@@ -34,6 +34,9 @@
           {% if p.width %}{{ p.width }}&times;{{ p.height }} · {% endif %}
           {{ (p.size | filesizeformat) if p.size else "? size" }}
         </div>
+        {% if p.folder_path %}
+        <div class="rg-path" title="{{ p.folder_path }}">📁 {{ p.folder_path }}</div>
+        {% endif %}
       </div>
       <div class="rg-choice">
         <label><input type="radio" name="action_{{ p.id }}" value="keep"

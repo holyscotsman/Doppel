@@ -290,6 +290,31 @@ def test_review_mode_all_loads_everything(client, config):
     assert everything.text.count('class="review-group') == REVIEW_BATCH + 5
 
 
+def test_review_card_shows_folder_path(client, config):
+    conn = connect(config.db_path)
+    cur = conn.execute(
+        "INSERT INTO groups (tier, created_at) VALUES ('exact', ?)", (now(),)
+    )
+    gid = cur.lastrowid
+    for i in range(2):
+        pid = insert_photo(
+            conn,
+            f"fp-{i}",
+            name=f"fp-{i}.jpg",
+            md5="fp",
+            size=1000 - i,
+            folder_path="Photos / 2024 / Beach",
+        )
+        conn.execute(
+            "INSERT INTO group_members (group_id, photo_id) VALUES (?, ?)", (gid, pid)
+        )
+    conn.commit()
+    conn.close()
+
+    page = client.get("/review", params={"tier": "exact"}).text
+    assert "Photos / 2024 / Beach" in page
+
+
 def test_settings_toggle_persists(client, config):
     from doppel.db import connect as db_connect
     from doppel.db import get_meta

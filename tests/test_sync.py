@@ -109,6 +109,33 @@ def test_sync_failure_is_recorded_and_recoverable(conn) -> None:
     assert all(row["status"] == "active" for row in photos(conn).values())
 
 
+def test_sync_resolves_folder_path(conn) -> None:
+    # Photos live in Beach, whose ancestry is Photos > 2024 > Beach.
+    folders = {"Beach": "2024", "2024": "Photos"}
+    files = [
+        make_file("a", name="p1.jpg", parent="Beach"),
+        make_file("b", name="p2.jpg", parent="Beach"),
+    ]
+    run_sync(conn, FakeDriveClient(files, folders=folders))
+
+    rows = photos(conn)
+    assert rows["a"]["parent_id"] == "Beach"
+    # last three segments, grandparent-first
+    assert rows["a"]["folder_path"] == "Photos / 2024 / Beach"
+    assert rows["b"]["folder_path"] == "Photos / 2024 / Beach"
+
+
+def test_sync_folder_path_is_best_effort(conn) -> None:
+    # An unresolvable parent (not in the folder map) must not fail the sync;
+    # folder_path just stays NULL.
+    files = [make_file("a", parent="Mystery")]
+    scan_id = run_sync(conn, FakeDriveClient(files, folders={}))
+
+    scan = conn.execute("SELECT status FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    assert scan["status"] == "done"
+    assert photos(conn)["a"]["folder_path"] is None
+
+
 def test_sync_handles_files_without_optional_fields(conn) -> None:
     client = FakeDriveClient(
         [make_file("bare", size=None, md5=None, width=None, height=None)]

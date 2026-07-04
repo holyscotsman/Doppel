@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS photos (
   thumb_path     TEXT,     -- local cache path, NULL until fetched
   phash          TEXT,     -- 16-char hex, NULL until computed
   dhash          TEXT,
+  parent_id      TEXT,     -- immediate Drive parent folder id
+  folder_path    TEXT,     -- resolved 'grandparent / parent / folder' for display
   status         TEXT NOT NULL DEFAULT 'active'  -- active | missing
 );
 CREATE INDEX IF NOT EXISTS idx_photos_md5 ON photos(md5);
@@ -88,7 +90,19 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created. CREATE TABLE
+    IF NOT EXISTS won't add columns to an existing table, so do it here."""
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(photos)")}
+    for column in ("parent_id TEXT", "folder_path TEXT"):
+        name = column.split()[0]
+        if name not in have:
+            conn.execute(f"ALTER TABLE photos ADD COLUMN {column}")
+    conn.commit()
 
 
 def get_meta(

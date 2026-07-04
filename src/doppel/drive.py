@@ -16,7 +16,8 @@ SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 LIST_QUERY = "mimeType contains 'image/' and trashed = false"
 LIST_FIELDS = (
     "nextPageToken, files(id, name, mimeType, size, md5Checksum, "
-    "imageMediaMetadata(width, height), createdTime, modifiedTime, thumbnailLink)"
+    "imageMediaMetadata(width, height), createdTime, modifiedTime, "
+    "thumbnailLink, parents)"
 )
 FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000

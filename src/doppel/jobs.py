@@ -70,11 +70,14 @@ def reconcile_orphaned_scans(conn: sqlite3.Connection) -> None:
 def _upsert_photo(conn: sqlite3.Connection, file: dict[str, Any]) -> None:
     meta = file.get("imageMediaMetadata") or {}
     size = file.get("size")
+    parents = file.get("parents") or []
+    parent_id = parents[0] if parents else None
     conn.execute(
         """
         INSERT INTO photos (drive_id, name, mime_type, size, md5, width, height,
-                            created_time, modified_time, thumbnail_link, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                            created_time, modified_time, thumbnail_link,
+                            parent_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(drive_id) DO UPDATE SET
           name = excluded.name,
           mime_type = excluded.mime_type,
@@ -85,6 +88,7 @@ def _upsert_photo(conn: sqlite3.Connection, file: dict[str, Any]) -> None:
           created_time = excluded.created_time,
           modified_time = excluded.modified_time,
           thumbnail_link = excluded.thumbnail_link,
+          parent_id = excluded.parent_id,
           status = 'active'
         """,
         (
@@ -98,6 +102,7 @@ def _upsert_photo(conn: sqlite3.Connection, file: dict[str, Any]) -> None:
             file.get("createdTime"),
             file.get("modifiedTime"),
             file.get("thumbnailLink"),
+            parent_id,
         ),
     )
 
@@ -124,6 +129,65 @@ def _invalidate_derived(
     if cache_dir is not None:
         for stale in Path(cache_dir).glob(f"{drive_id}_*"):
             stale.unlink(missing_ok=True)
+
+
+def _resolve_folder_path(
+    client: DriveClient,
+    cache: dict[str, tuple[str | None, str | None]],
+    folder_id: str | None,
+    depth: int = 3,
+) -> str | None:
+    """Best-effort 'grandparent / parent / folder' label for a folder id.
+
+    Walks up to `depth` levels via client.get_folder, memoising each folder's
+    (name, parent) in `cache` so a shared ancestor is fetched once per sync.
+    Returns None if nothing resolved (e.g. an ancestor is not readable by this
+    account) — path display is cosmetic and must never fail a sync.
+    """
+    segments: list[str] = []
+    fid = folder_id
+    for _ in range(depth):
+        if fid is None:
+            break
+        if fid not in cache:
+            try:
+                meta = client.get_folder(fid)
+            except Exception:
+                break
+            parents = meta.get("parents") or []
+            cache[fid] = (meta.get("name"), parents[0] if parents else None)
+        name, parent = cache[fid]
+        if not name:
+            break
+        segments.append(name)
+        fid = parent
+    if not segments:
+        return None
+    return " / ".join(reversed(segments))
+
+
+def _resolve_folder_paths(conn: sqlite3.Connection, client: DriveClient) -> None:
+    """Fill photos.folder_path for every active photo, grouped by parent so
+    each distinct folder resolves once. Skipped if the client can't resolve
+    folders (e.g. the test fake) — best-effort, never raises."""
+    if not hasattr(client, "get_folder"):
+        return
+    cache: dict[str, tuple[str | None, str | None]] = {}
+    parents = [
+        row["parent_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT parent_id FROM photos "
+            "WHERE status = 'active' AND parent_id IS NOT NULL"
+        )
+    ]
+    for parent_id in parents:
+        path = _resolve_folder_path(client, cache, parent_id)
+        if path is not None:
+            conn.execute(
+                "UPDATE photos SET folder_path = ? WHERE parent_id = ?",
+                (path, parent_id),
+            )
+    conn.commit()
 
 
 def run_sync(
@@ -201,6 +265,7 @@ def run_sync(
             "UPDATE photos SET status = 'missing' "
             "WHERE drive_id NOT IN (SELECT drive_id FROM seen)"
         )
+        _resolve_folder_paths(conn, client)
         finish_scan(conn, scan_id, total=processed)
     except BaseException as exc:  # incl. KeyboardInterrupt: ledger must be truthful
         fail_scan(conn, scan_id, f"{type(exc).__name__}: {exc}")
