@@ -17,7 +17,7 @@
   {% for tier in ["exact", "near", "similar", "vlm"] %}
   <div class="card">
     <div class="big">{{ tier_counts.get(tier, 0) }}</div>
-    <div class="label"><a href="/groups?tier={{ tier }}">{{ tier }} groups</a></div>
+    <div class="label"><a href="/review?tier={{ tier }}">{{ tier }} groups</a></div>
   </div>
   {% endfor %}
   <div class="card">

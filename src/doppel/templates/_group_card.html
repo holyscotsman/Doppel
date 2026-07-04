@@ -1,0 +1,44 @@
+<div class="review-group{% if g.reviewed %} reviewed{% endif %}" id="group-{{ g.group.id }}">
+  <div class="rg-head">
+    <span class="rg-title">Group {{ g.group.id }} · {{ g.members | length }} photos</span>
+    {% if g.group.color_variant %}<span class="badge">color variant</span>{% endif %}
+    {% if g.reviewed %}<span class="badge badge-ok">reviewed</span>{% endif %}
+    <span class="rg-actions">
+      {% if g.reclaim %}<span class="muted">frees {{ g.reclaim | filesizeformat }}</span>{% endif %}
+      <button type="button" class="mini-btn"
+              hx-post="/groups/{{ g.group.id }}/keep"
+              hx-target="#group-{{ g.group.id }}" hx-swap="outerHTML">
+        keep all (not dupes)
+      </button>
+    </span>
+  </div>
+  {% if g.verdicts %}
+  <div class="rg-verdicts">
+    {% for v in g.verdicts %}
+    <div class="muted">{{ v.a }} vs {{ v.b }}: <b>{{ v.verdict }}</b>{% if v.reason %} — {{ v.reason }}{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <form class="rg-members"
+        hx-post="/groups/{{ g.group.id }}/decisions" hx-trigger="change"
+        hx-target="#group-{{ g.group.id }}" hx-swap="outerHTML">
+    {% for p in g.members %}
+    <div class="rg-photo {{ g.selected[p.id] }}">
+      <img class="thumb-lg" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+      <div class="rg-meta">
+        <div class="rg-name">{{ p.name }}</div>
+        <div class="muted">
+          {% if p.width %}{{ p.width }}&times;{{ p.height }} · {% endif %}
+          {{ (p.size | filesizeformat) if p.size else "? size" }}
+        </div>
+      </div>
+      <div class="rg-choice">
+        <label><input type="radio" name="action_{{ p.id }}" value="keep"
+               {% if g.selected[p.id] == 'keep' %}checked{% endif %}> keep</label>
+        <label><input type="radio" name="action_{{ p.id }}" value="trash"
+               {% if g.selected[p.id] == 'trash' %}checked{% endif %}> trash</label>
+      </div>
+    </div>
+    {% endfor %}
+  </form>
+</div>

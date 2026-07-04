@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}review {{ tier }} — doppel{% endblock %}
+{% block content %}
+<h2>Review duplicates</h2>
+
+<div class="review-tabs">
+  {% for t in ["exact", "near", "similar", "vlm"] %}
+  <a href="/review?tier={{ t }}" class="{% if t == tier %}on{% endif %}">{{ t }}</a>
+  {% endfor %}
+</div>
+
+<div class="review-bar">
+  <span>{{ stats.reviewed_groups or 0 }} of {{ stats.total_groups or 0 }} groups reviewed</span>
+  {% if reclaim_total %}<span class="reclaim">↓ frees up {{ reclaim_total | filesizeformat }}</span>{% endif %}
+  <span class="review-filter">
+    {% for value, label in [("no", "to review"), ("all", "all"), ("yes", "done")] %}
+      {% if reviewed == value %}<strong>{{ label }}</strong>
+      {% else %}<a href="/review?tier={{ tier }}&reviewed={{ value }}">{{ label }}</a>{% endif %}
+    {% endfor %}
+  </span>
+  <form method="post" action="/review/auto?tier={{ tier }}&reviewed={{ reviewed }}" style="margin:0">
+    <button type="submit" class="mini-btn">auto-keep largest in all unreviewed</button>
+  </form>
+  <a href="/export" class="mini-btn">export trash list</a>
+</div>
+
+{% if not groups %}
+<p class="muted">No {{ tier }} groups{% if reviewed == 'no' %} left to review{% endif %}.
+  Run a scan from the <a href="/">dashboard</a>.</p>
+{% endif %}
+
+<div id="review-stream">
+  {% include "_review_batch.html" %}
+</div>
+{% endblock %}

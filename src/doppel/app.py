@@ -68,6 +68,15 @@ STAGE_LABELS = {
 
 PAGE_SIZE = 20
 
+# groups loaded per infinite-scroll batch on the one-page review
+REVIEW_BATCH = 8
+
+REVIEWED_FILTERS = {
+    "all": "",
+    "yes": "HAVING decided = members",
+    "no": "HAVING decided < members",
+}
+
 
 def auth_mode() -> str | None:
     """How Drive is connected: a service-account key takes precedence over an
@@ -711,6 +720,177 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such scan")
         return dict(row)
 
+    def _group_context(conn: sqlite3.Connection, group_id: int) -> dict | None:
+        """Everything a group card/detail needs: members (largest first), the
+        keep/trash selection (largest kept by default, saved decisions win),
+        whether it's fully reviewed, reclaimable bytes, and VLM verdicts."""
+        group = conn.execute(
+            "SELECT * FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        if group is None:
+            return None
+        members = conn.execute(
+            """
+            SELECT p.*, m.score FROM group_members m
+            JOIN photos p ON p.id = m.photo_id
+            WHERE m.group_id = ? ORDER BY p.size DESC
+            """,
+            (group_id,),
+        ).fetchall()
+        decisions = {
+            row["photo_id"]: row["action"]
+            for row in conn.execute(
+                """
+                SELECT d.photo_id, d.action FROM decisions d
+                JOIN group_members m ON m.photo_id = d.photo_id
+                WHERE m.group_id = ?
+                """,
+                (group_id,),
+            )
+        }
+        selected = {
+            p["id"]: decisions.get(p["id"], "keep" if i == 0 else "trash")
+            for i, p in enumerate(members)
+        }
+        reviewed = len(decisions) == len(members) and len(members) > 0
+        reclaim = sum((p["size"] or 0) for p in members if selected[p["id"]] == "trash")
+        verdicts = []
+        if group["tier"] == "vlm" and members:
+            import json as _json
+
+            names = {p["id"]: p["name"] for p in members}
+            ids = list(names)
+            placeholders = ",".join("?" * len(ids))
+            seen_pairs: set[tuple[int, int]] = set()
+            for row in conn.execute(
+                f"""
+                SELECT * FROM vlm_results
+                WHERE task = 'adjudicate'
+                  AND photo_id IN ({placeholders})
+                  AND photo_id_b IN ({placeholders})
+                ORDER BY id DESC
+                """,  # noqa: S608 — placeholders only
+                (*ids, *ids),
+            ):
+                pair = (row["photo_id"], row["photo_id_b"])
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                try:
+                    reason = _json.loads(row["response"]).get("reason", "")
+                except ValueError:
+                    reason = ""
+                verdicts.append(
+                    {
+                        "a": names[row["photo_id"]],
+                        "b": names[row["photo_id_b"]],
+                        "verdict": row["verdict"],
+                        "reason": reason,
+                    }
+                )
+        return {
+            "group": group,
+            "members": members,
+            "selected": selected,
+            "reviewed": reviewed,
+            "reclaim": reclaim,
+            "verdicts": verdicts,
+        }
+
+    def _review_page_ids(
+        conn: sqlite3.Connection, tier: str, reviewed: str, page: int
+    ) -> tuple[list[int], int, dict]:
+        """Group ids for a review batch, total group count, and review stats."""
+        having = REVIEWED_FILTERS.get(reviewed)
+        if having is None:
+            raise HTTPException(status_code=422, detail="reviewed must be all|yes|no")
+        base_query = f"""
+            SELECT g.id, COUNT(m.photo_id) AS members,
+                   COUNT(d.photo_id) AS decided
+            FROM groups g
+            JOIN group_members m ON m.group_id = g.id
+            LEFT JOIN decisions d ON d.photo_id = m.photo_id
+            WHERE g.tier = ?
+            GROUP BY g.id {having}
+        """  # noqa: S608 — `having` from the fixed map above
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM ({base_query})", (tier,)
+        ).fetchone()["n"]
+        ids = [
+            r["id"]
+            for r in conn.execute(
+                f"{base_query} ORDER BY g.id LIMIT ? OFFSET ?",
+                (tier, REVIEW_BATCH, (page - 1) * REVIEW_BATCH),
+            )
+        ]
+        # tier-wide stats (independent of the reviewed filter)
+        stats = conn.execute(
+            """
+            SELECT COUNT(*) AS total_groups,
+                   SUM(CASE WHEN decided = members THEN 1 ELSE 0 END) AS reviewed_groups
+            FROM (
+              SELECT g.id, COUNT(m.photo_id) AS members, COUNT(d.photo_id) AS decided
+              FROM groups g JOIN group_members m ON m.group_id = g.id
+              LEFT JOIN decisions d ON d.photo_id = m.photo_id
+              WHERE g.tier = ? GROUP BY g.id
+            )
+            """,
+            (tier,),
+        ).fetchone()
+        return ids, total, dict(stats)
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        ids, total, stats = _review_page_ids(conn, tier, reviewed, 1)
+        groups = [_group_context(conn, gid) for gid in ids]
+        reclaim_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(p.size), 0) AS n FROM decisions d
+            JOIN photos p ON p.id = d.photo_id WHERE d.action = 'trash'
+            """
+        ).fetchone()["n"]
+        return templates.TemplateResponse(
+            request,
+            "review.html",
+            {
+                "tier": tier,
+                "reviewed": reviewed,
+                "groups": groups,
+                "has_more": total > REVIEW_BATCH,
+                "next_page": 2,
+                "total": total,
+                "stats": stats,
+                "reclaim_total": reclaim_total,
+            },
+        )
+
+    @app.get("/review/groups", response_class=HTMLResponse)
+    def review_groups(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        page: int = 2,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        ids, total, _ = _review_page_ids(conn, tier, reviewed, page)
+        groups = [_group_context(conn, gid) for gid in ids]
+        return templates.TemplateResponse(
+            request,
+            "_review_batch.html",
+            {
+                "tier": tier,
+                "reviewed": reviewed,
+                "groups": groups,
+                "has_more": page * REVIEW_BATCH < total,
+                "next_page": page + 1,
+            },
+        )
+
     @app.get("/groups", response_class=HTMLResponse)
     def group_list(
         request: Request,
@@ -889,7 +1069,88 @@ def create_app(
                 (photo_id, action, now()),
             )
         conn.commit()
+        # htmx (the one-page review) swaps the updated card in place; a plain
+        # form submit (the standalone detail page) redirects as before
+        if request.headers.get("HX-Request"):
+            return templates.TemplateResponse(
+                request, "_group_card.html", {"g": _group_context(conn, group_id)}
+            )
         return RedirectResponse(url=f"/groups/{group_id}", status_code=303)
+
+    @app.post("/groups/{group_id}/keep", response_class=HTMLResponse)
+    def keep_group(
+        request: Request,
+        group_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """'Keep group' — these aren't duplicates: mark every member keep."""
+        member_ids = [
+            row["photo_id"]
+            for row in conn.execute(
+                "SELECT photo_id FROM group_members WHERE group_id = ?", (group_id,)
+            )
+        ]
+        if not member_ids:
+            raise HTTPException(status_code=404, detail="no such group")
+        for pid in member_ids:
+            conn.execute(
+                """
+                INSERT INTO decisions (photo_id, action, decided_at)
+                VALUES (?, 'keep', ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                  action = 'keep', decided_at = excluded.decided_at
+                """,
+                (pid, now()),
+            )
+        conn.commit()
+        return templates.TemplateResponse(
+            request, "_group_card.html", {"g": _group_context(conn, group_id)}
+        )
+
+    @app.post("/review/auto")
+    def auto_resolve(
+        tier: str = "exact",
+        reviewed: str = "no",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Auto-resolve every not-yet-reviewed group in the tier: keep the
+        largest file, trash the rest. Groups you've already reviewed are left
+        untouched."""
+        group_ids = [
+            r["id"]
+            for r in conn.execute(
+                """
+                SELECT g.id FROM groups g
+                JOIN group_members m ON m.group_id = g.id
+                LEFT JOIN decisions d ON d.photo_id = m.photo_id
+                WHERE g.tier = ?
+                GROUP BY g.id HAVING COUNT(d.photo_id) < COUNT(m.photo_id)
+                """,
+                (tier,),
+            )
+        ]
+        for gid in group_ids:
+            members = conn.execute(
+                """
+                SELECT p.id FROM group_members m JOIN photos p ON p.id = m.photo_id
+                WHERE m.group_id = ? ORDER BY p.size DESC
+                """,
+                (gid,),
+            ).fetchall()
+            for i, row in enumerate(members):
+                conn.execute(
+                    """
+                    INSERT INTO decisions (photo_id, action, decided_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(photo_id) DO UPDATE SET
+                      action = excluded.action, decided_at = excluded.decided_at
+                    """,
+                    (row["id"], "keep" if i == 0 else "trash", now()),
+                )
+        conn.commit()
+        return RedirectResponse(
+            url=f"/review?tier={tier}&reviewed={reviewed}", status_code=303
+        )
 
     @app.get("/export")
     def export_csv(conn: sqlite3.Connection = Depends(get_conn)):
