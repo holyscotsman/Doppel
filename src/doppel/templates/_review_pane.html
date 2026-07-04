@@ -1,0 +1,48 @@
+{% set titles = {"exact": "Exact duplicates", "near": "Near-duplicates", "similar": "Similar photos", "vlm": "AI-checked"} %}
+<div class="review-head">
+  <h2>{{ titles.get(tier, tier) }}</h2>
+  <span class="muted rh-stats">{{ stats.reviewed_groups or 0 }} of {{ stats.total_groups or 0 }} groups reviewed{% if reclaim_total %} · <span class="reclaim">frees up {{ reclaim_total | filesizeformat }}</span>{% endif %}</span>
+</div>
+
+<form class="review-controls" hx-get="/review/pane" hx-target="#review-pane"
+      hx-swap="innerHTML" hx-trigger="change">
+  <input type="hidden" name="tier" value="{{ tier }}">
+  <label class="ctl">Show
+    <select name="reviewed">
+      {% for val, lbl in [("no", "to review"), ("all", "all"), ("yes", "reviewed")] %}
+      <option value="{{ val }}"{% if reviewed == val %} selected{% endif %}>{{ lbl }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="ctl">Sort
+    <select name="sort">
+      {% for key, lbl in sort_options %}
+      <option value="{{ key }}"{% if sort == key %} selected{% endif %}>{{ lbl }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% if tier in ('near', 'vlm') %}
+  <label class="ctl chk">
+    <input type="checkbox" name="variants" value="1"{% if variants %} checked{% endif %}>
+    color variants only
+  </label>
+  {% endif %}
+</form>
+
+<div class="review-actions">
+  <button type="button" class="mini-btn"
+          hx-post="/review/auto?tier={{ tier }}&reviewed={{ reviewed }}&sort={{ sort }}&variants={{ '1' if variants else '' }}"
+          hx-target="#review-pane" hx-swap="innerHTML"
+          title="Keep the largest photo in every group you haven't touched yet">
+    auto-keep largest
+  </button>
+  <a href="/export" class="mini-btn">export trash list</a>
+</div>
+
+{% if not groups %}
+<p class="muted empty">No {{ titles.get(tier, tier) | lower }}{% if reviewed == 'no' %} left to review{% elif variants %} match this filter{% endif %} yet.</p>
+{% endif %}
+
+<div id="review-stream">
+  {% include "_review_batch.html" %}
+</div>

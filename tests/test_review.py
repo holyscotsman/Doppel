@@ -200,4 +200,4 @@ def test_full_flow_scan_review_export(client, config) -> None:
     assert "unrelated.jpg" not in export
 
     dashboard = client.get("/")
-    assert "marked for trash" in dashboard.text
+    assert "Trash queue" in dashboard.text

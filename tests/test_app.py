@@ -37,7 +37,7 @@ def test_dashboard_renders_counts(client, config) -> None:
     resp = client.get("/")
     assert resp.status_code == 200
     assert "3" in resp.text  # active photos
-    assert "exact groups" in resp.text
+    assert "Exact" in resp.text  # the tier navigation lists each category
 
 
 def test_group_list_and_detail(client, config) -> None:
@@ -164,8 +164,8 @@ def test_dashboard_shows_exact_group_count(client, config) -> None:
     run_exact_via_ui(client)
 
     resp = client.get("/")
-    # exactly one exact group: its count card must render 1
-    assert '<div class="big">1</div>' in resp.text
+    # exactly one exact group: the Exact tier badge in the left nav reads 1
+    assert '<span class="tier-count">1</span>' in resp.text
 
 
 def test_stage_error_is_delivered_out_of_band(client, monkeypatch, tmp_path) -> None:

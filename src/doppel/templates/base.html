@@ -16,6 +16,57 @@
     header h1 { font-size: 1.1rem; margin: 0; }
     header h1 a { color: #e8eaed; }
     main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    /* two-pane workspace: scan pinned left, review right, animated split */
+    .workspace { display: flex; gap: 1.5rem; align-items: flex-start; }
+    .pane-left { flex: 1 1 100%; min-width: 0;
+                 transition: flex-basis 0.5s cubic-bezier(.4,0,.2,1),
+                             max-width 0.5s cubic-bezier(.4,0,.2,1); }
+    .workspace.split .pane-left { flex: 0 0 32%; max-width: 32%;
+                                  position: sticky; top: 1rem; }
+    .pane-right { flex: 1 1 0; min-width: 0; max-width: 0; overflow: hidden;
+                  opacity: 0; transition: opacity 0.4s ease 0.15s; }
+    .workspace.split .pane-right { flex: 1 1 0; max-width: 100%; opacity: 1;
+                                   overflow: visible; }
+    .review-welcome { padding: 2rem 0; }
+    /* left-pane library + tier navigation */
+    .lib-summary { display: flex; align-items: baseline; gap: 0.6rem; margin: 0.2rem 0 1rem; }
+    .lib-num { font-size: 1.8rem; font-weight: 700; }
+    .tiny { font-size: 0.75rem; }
+    .tier-nav { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 1.2rem; }
+    .tier-link { display: flex; align-items: center; justify-content: space-between;
+                 gap: 0.6rem; padding: 0.5rem 0.8rem; border: 1px solid #2a2e37;
+                 border-radius: 8px; background: #14171d; color: #c8ccd2; }
+    .tier-link:hover { border-color: #8ab4f8; color: #fff; text-decoration: none; }
+    .tier-link.on { background: #1c2635; border-color: #8ab4f8; color: #fff; }
+    .tier-name { font-weight: 600; font-size: 0.92rem; }
+    .tier-count { min-width: 1.6rem; text-align: center; background: #262b34;
+                  border-radius: 999px; padding: 0.05rem 0.5rem; font-size: 0.8rem;
+                  font-weight: 700; }
+    .tier-link.on .tier-count { background: #8ab4f8; color: #0b0d11; }
+    .trash-link { margin-top: 0.35rem; border-style: dashed; }
+    .pane-left .daily-scan { margin: 0 0 1rem; }
+    /* review pane head + controls */
+    .review-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap;
+                   margin-bottom: 0.6rem; }
+    .review-head h2 { margin: 0; }
+    .rh-stats { font-size: 0.88rem; }
+    .review-controls { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+                       padding: 0.6rem 0.9rem; background: #1a1e26; border: 1px solid #2a2e37;
+                       border-radius: 8px; margin-bottom: 0.7rem; }
+    .ctl { font-size: 0.85rem; color: #9aa0a6; display: inline-flex; align-items: center;
+           gap: 0.4rem; }
+    .ctl.chk { cursor: pointer; }
+    .review-controls select { font-size: 0.85rem; padding: 0.3rem 0.5rem; }
+    .review-actions { display: flex; gap: 0.7rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .empty { padding: 1.5rem 0; }
+    @media (max-width: 780px) {
+      .workspace, .workspace.split { flex-direction: column; }
+      .workspace.split .pane-left { flex-basis: auto; max-width: 100%; }
+      .pane-left.pane-left { position: static; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .pane-left, .pane-right { transition: none; }
+    }
     .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
     .card { background: #1a1e26; border: 1px solid #2a2e37; border-radius: 8px;
             padding: 1rem 1.4rem; min-width: 130px; }
@@ -230,6 +281,18 @@
   </style>
 </head>
 <body>
+<script>
+  // Tier click: reveal the review pane (animated split) and move the active
+  // highlight, since the left nav isn't re-rendered when only the pane swaps.
+  function pickTier(el) {
+    var ws = document.getElementById('workspace');
+    if (ws) ws.classList.add('split');
+    document.querySelectorAll('.tier-nav .tier-link').forEach(function (a) {
+      a.classList.remove('on');
+    });
+    el.classList.add('on');
+  }
+</script>
 <header>
   <h1><a href="/">doppel</a></h1>
   <nav>

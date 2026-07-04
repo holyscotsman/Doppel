@@ -150,6 +150,72 @@ REVIEW_ORDER = {
     "similar": "ORDER BY min_score DESC, g.id",  # highest worst-cosine = tightest
 }
 
+# user-selectable sort options for the review pane. Each maps to a fixed
+# ORDER BY fragment (never interpolated from user input) — the key is
+# validated against this whitelist. "reclaim" = potential space freed by
+# keeping only the largest member (total size minus the biggest file).
+SORT_LABELS = {
+    "confidence": "best match first",
+    "reclaim": "biggest space savings",
+    "largest": "most photos",
+    "smallest": "fewest photos",
+    "size": "largest files first",
+}
+_SIZE = "COALESCE(SUM(p2.size), 0)"
+_RECLAIM = f"({_SIZE} - COALESCE(MAX(p2.size), 0))"
+_SORT_ORDER = {
+    "reclaim": f"ORDER BY {_RECLAIM} DESC, g.id",
+    "largest": "ORDER BY members DESC, g.id",
+    "smallest": "ORDER BY members ASC, g.id",
+    "size": f"ORDER BY {_SIZE} DESC, g.id",
+}
+
+
+def _truthy(value: str) -> bool:
+    return value.lower() in ("1", "true", "on", "yes")
+
+
+def _pane_push_url(tier: str, reviewed: str, sort: str, variants: bool) -> str:
+    """The full-page URL that reproduces a review-pane view, for the browser
+    address bar. Refreshing/bookmarking it re-renders the same split workspace,
+    so filter/sort/variants survive a reload."""
+    from urllib.parse import urlencode
+
+    params = {"tier": tier, "reviewed": reviewed, "sort": sort}
+    if variants:
+        params["variants"] = "1"
+    return "/review?" + urlencode(params)
+
+
+def default_sort(tier: str) -> str:
+    """Confidence only means something where there's a numeric score."""
+    return "confidence" if tier in ("near", "similar") else "reclaim"
+
+
+def resolve_sort(tier: str, sort: str | None) -> str:
+    """Coerce a sort key to something valid for this tier (cosmetic param —
+    never 422; fall back to the tier default)."""
+    if sort == "confidence" and tier in ("near", "similar"):
+        return "confidence"
+    if sort in _SORT_ORDER:
+        return sort
+    return default_sort(tier)
+
+
+def sort_order_clause(tier: str, sort: str) -> str:
+    if sort == "confidence":
+        return REVIEW_ORDER.get(tier, "ORDER BY g.id")
+    return _SORT_ORDER.get(sort, "ORDER BY g.id")
+
+
+def sort_options(tier: str) -> list[tuple[str, str]]:
+    """(key, label) sort choices offered for a tier — confidence only where a
+    score exists."""
+    keys = list(SORT_LABELS)
+    if tier not in ("near", "similar"):
+        keys = [k for k in keys if k != "confidence"]
+    return [(k, SORT_LABELS[k]) for k in keys]
+
 
 def scan_is_due(
     enabled: bool,
@@ -907,8 +973,9 @@ def create_app(
             f"/setup?msg={quote(f'scan scope set to {label}')}", status_code=303
         )
 
-    @app.get("/", response_class=HTMLResponse)
-    def dashboard(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    def _left_pane_ctx(conn: sqlite3.Connection) -> dict:
+        """Everything the persistent left pane shows: library totals, per-tier
+        group counts (the tier navigation), pending trash, and scan status."""
         photo_count = conn.execute(
             "SELECT COUNT(*) AS n FROM photos WHERE status = 'active'"
         ).fetchone()["n"]
@@ -924,26 +991,130 @@ def create_app(
             "SELECT COUNT(*) AS n FROM decisions d JOIN photos p ON p.id = d.photo_id "
             "WHERE d.action = 'trash' AND p.status = 'active'"
         ).fetchone()["n"]
-        daily_enabled = get_meta(conn, "daily_scan", "off") == "on"
+        reclaim_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(p.size), 0) AS n FROM decisions d
+            JOIN photos p ON p.id = d.photo_id
+            WHERE d.action = 'trash' AND p.status = 'active'
+            """
+        ).fetchone()["n"]
         last_full = conn.execute(
             "SELECT finished_at FROM scans WHERE stage = 'sync' AND status = 'done' "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        return templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            {
-                "photo_count": photo_count,
-                "tier_counts": tier_counts,
-                "trash_count": trash_count,
-                "scans": scan_overview(conn),
-                "any_running": app.state.runner.running_stage() is not None,
-                "needs_setup": auth_mode() is None,
-                "folder_id": config.drive_folder_id,
-                "daily_enabled": daily_enabled,
-                "last_full_scan": last_full["finished_at"] if last_full else None,
-            },
+        return {
+            "photo_count": photo_count,
+            "tier_counts": tier_counts,
+            "trash_count": trash_count,
+            "reclaim_total": reclaim_total,
+            "scans": scan_overview(conn),
+            "any_running": app.state.runner.running_stage() is not None,
+            "needs_setup": auth_mode() is None,
+            "folder_id": config.drive_folder_id,
+            "daily_enabled": get_meta(conn, "daily_scan", "off") == "on",
+            "last_full_scan": last_full["finished_at"] if last_full else None,
+        }
+
+    def _review_pane_ctx(
+        conn: sqlite3.Connection,
+        tier: str,
+        reviewed: str,
+        sort: str,
+        variants: bool,
+    ) -> dict:
+        """Context for the right review pane: the group cards for the current
+        tier/filter/sort plus the controls' current state."""
+        sort = resolve_sort(tier, sort)
+        all_at_once = get_meta(conn, "review_mode", "scroll") == "all"
+        ids, total, stats = _review_page_ids(
+            conn,
+            tier,
+            reviewed,
+            sort,
+            variants,
+            page=1,
+            limit=None if all_at_once else REVIEW_BATCH,
         )
+        groups = [_group_context(conn, gid) for gid in ids]
+        reclaim_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(p.size), 0) AS n FROM decisions d
+            JOIN photos p ON p.id = d.photo_id
+            WHERE d.action = 'trash' AND p.status = 'active'
+            """
+        ).fetchone()["n"]
+        return {
+            "tier": tier,
+            "reviewed": reviewed,
+            "sort": sort,
+            "variants": variants,
+            "sort_options": sort_options(tier),
+            "groups": groups,
+            "has_more": (not all_at_once) and total > REVIEW_BATCH,
+            "next_page": 2,
+            "total": total,
+            "stats": stats,
+            "reclaim_total": reclaim_total,
+        }
+
+    def _render_workspace(
+        request: Request,
+        conn: sqlite3.Connection,
+        tier: str | None,
+        reviewed: str,
+        sort: str | None,
+        variants: str,
+    ) -> HTMLResponse:
+        ctx = _left_pane_ctx(conn)
+        ctx["active_tier"] = tier
+        if tier:
+            # merge the review-pane vars to the top level so the shared
+            # _review_pane.html partial reads the same names here and when the
+            # /review/pane route returns it standalone
+            ctx.update(
+                _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+            )
+        return templates.TemplateResponse(request, "workspace.html", ctx)
+
+    @app.get("/", response_class=HTMLResponse)
+    def home(
+        request: Request,
+        tier: str | None = None,
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        return _render_workspace(request, conn, tier, reviewed, sort, variants)
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        return _render_workspace(request, conn, tier, reviewed, sort, variants)
+
+    @app.get("/review/pane", response_class=HTMLResponse)
+    def review_pane(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        ctx = _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+        resp = templates.TemplateResponse(request, "_review_pane.html", ctx)
+        # keep the address bar in sync so refresh/bookmark/share preserve the
+        # tier + filter + sort the user is actually looking at
+        resp.headers["HX-Push-Url"] = _pane_push_url(
+            tier, ctx["reviewed"], ctx["sort"], ctx["variants"]
+        )
+        return resp
 
     @app.get("/partials/scans", response_class=HTMLResponse)
     def scans_partial(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
@@ -1083,29 +1254,33 @@ def create_app(
         conn: sqlite3.Connection,
         tier: str,
         reviewed: str,
-        page: int,
+        sort: str = "confidence",
+        variants: bool = False,
+        page: int = 1,
         limit: int | None = REVIEW_BATCH,
     ) -> tuple[list[int], int, dict]:
         """Group ids for a review batch (or all groups when limit is None),
-        the total group count, and review stats. Near/similar are ordered
-        most-confident first; other tiers by id."""
+        the total group count, and review stats. Ordering comes from the
+        validated `sort` key; `variants` restricts to color-variant groups."""
         having = REVIEWED_FILTERS.get(reviewed)
         if having is None:
             raise HTTPException(status_code=422, detail="reviewed must be all|yes|no")
+        variant_clause = "AND g.color_variant = 1" if variants else ""
         base_query = f"""
             SELECT g.id, COUNT(m.photo_id) AS members,
                    COUNT(d.photo_id) AS decided,
                    MIN(m.score) AS min_score, MAX(m.score) AS max_score
             FROM groups g
             JOIN group_members m ON m.group_id = g.id
+            JOIN photos p2 ON p2.id = m.photo_id
             LEFT JOIN decisions d ON d.photo_id = m.photo_id
-            WHERE g.tier = ?
+            WHERE g.tier = ? {variant_clause}
             GROUP BY g.id {having}
-        """  # noqa: S608 — `having` from the fixed map above
+        """  # noqa: S608 — `having`/`variant_clause` from fixed maps above
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM ({base_query})", (tier,)
         ).fetchone()["n"]
-        order = REVIEW_ORDER.get(tier, "ORDER BY g.id")
+        order = sort_order_clause(tier, resolve_sort(tier, sort))
         if limit is None:
             ids = [
                 r["id"]
@@ -1135,49 +1310,21 @@ def create_app(
         ).fetchone()
         return ids, total, dict(stats)
 
-    @app.get("/review", response_class=HTMLResponse)
-    def review(
-        request: Request,
-        tier: str = "exact",
-        reviewed: str = "all",
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        all_at_once = get_meta(conn, "review_mode", "scroll") == "all"
-        ids, total, stats = _review_page_ids(
-            conn, tier, reviewed, 1, limit=None if all_at_once else REVIEW_BATCH
-        )
-        groups = [_group_context(conn, gid) for gid in ids]
-        reclaim_total = conn.execute(
-            """
-            SELECT COALESCE(SUM(p.size), 0) AS n FROM decisions d
-            JOIN photos p ON p.id = d.photo_id WHERE d.action = 'trash'
-            """
-        ).fetchone()["n"]
-        return templates.TemplateResponse(
-            request,
-            "review.html",
-            {
-                "tier": tier,
-                "reviewed": reviewed,
-                "groups": groups,
-                # in all-at-once mode everything is already on the page
-                "has_more": (not all_at_once) and total > REVIEW_BATCH,
-                "next_page": 2,
-                "total": total,
-                "stats": stats,
-                "reclaim_total": reclaim_total,
-            },
-        )
-
     @app.get("/review/groups", response_class=HTMLResponse)
     def review_groups(
         request: Request,
         tier: str = "exact",
         reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
         page: int = 2,
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        ids, total, _ = _review_page_ids(conn, tier, reviewed, page)
+        sort = resolve_sort(tier, sort)
+        variants_on = _truthy(variants)
+        ids, total, _ = _review_page_ids(
+            conn, tier, reviewed, sort, variants_on, page=page
+        )
         groups = [_group_context(conn, gid) for gid in ids]
         return templates.TemplateResponse(
             request,
@@ -1185,6 +1332,10 @@ def create_app(
             {
                 "tier": tier,
                 "reviewed": reviewed,
+                "sort": sort,
+                # a bool, so the next-page sentinel agrees with page 1 no matter
+                # how the incoming param was spelled (avoids skip/dup across pages)
+                "variants": variants_on,
                 "groups": groups,
                 "has_more": page * REVIEW_BATCH < total,
                 "next_page": page + 1,
@@ -1405,8 +1556,11 @@ def create_app(
 
     @app.post("/review/auto")
     def auto_resolve(
+        request: Request,
         tier: str = "exact",
         reviewed: str = "no",
+        sort: str | None = None,
+        variants: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         """Auto-resolve every UNTOUCHED group in the tier: keep the largest
@@ -1445,6 +1599,15 @@ def create_app(
                     (row["id"], "keep" if i == 0 else "trash", now()),
                 )
         conn.commit()
+        # htmx (the workspace) swaps the refreshed review pane in place; a plain
+        # POST falls back to a full navigation
+        if request.headers.get("HX-Request"):
+            ctx = _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+            resp = templates.TemplateResponse(request, "_review_pane.html", ctx)
+            resp.headers["HX-Push-Url"] = _pane_push_url(
+                tier, ctx["reviewed"], ctx["sort"], ctx["variants"]
+            )
+            return resp
         return RedirectResponse(
             url=f"/review?tier={tier}&reviewed={reviewed}", status_code=303
         )

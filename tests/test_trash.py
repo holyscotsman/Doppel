@@ -145,7 +145,7 @@ def test_trashed_photos_drop_out_of_dashboard_count(trash_client, config):
     mark_trash(conn, "two", 1000)
     conn.close()
 
-    assert "marked for trash" in trash_client.get("/").text
+    assert "Trash queue" in trash_client.get("/").text
     trash_client.post("/trash")
     # after moving, the pending-trash count is 0 (they're status='trashed')
     conn = connect(config.db_path)

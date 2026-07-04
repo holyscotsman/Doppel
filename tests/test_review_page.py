@@ -290,6 +290,117 @@ def test_review_mode_all_loads_everything(client, config):
     assert everything.text.count('class="review-group') == REVIEW_BATCH + 5
 
 
+def test_sort_helpers():
+    from doppel.app import default_sort, resolve_sort, sort_options
+
+    assert default_sort("near") == "confidence"
+    assert default_sort("exact") == "reclaim"
+    # confidence is meaningless without a score, so it's coerced away off near/similar
+    assert resolve_sort("exact", "confidence") == "reclaim"
+    assert resolve_sort("near", "confidence") == "confidence"
+    assert resolve_sort("exact", "garbage") == "reclaim"  # unknown -> tier default
+    assert resolve_sort("similar", "reclaim") == "reclaim"
+    assert "confidence" not in dict(sort_options("exact"))
+    assert "confidence" in dict(sort_options("near"))
+
+
+def test_review_sort_is_whitelisted_against_injection(client, config):
+    conn = connect(config.db_path)
+    make_exact_group(conn, "a", [2000, 500])
+    conn.close()
+    # a sort key crafted as SQL must be coerced to a safe default, not executed
+    resp = client.get(
+        "/review/pane",
+        params={"tier": "exact", "sort": "reclaim); DROP TABLE photos;--"},
+    )
+    assert resp.status_code == 200
+    conn = connect(config.db_path)
+    # the photos table is untouched — no injection ran
+    assert conn.execute("SELECT COUNT(*) AS n FROM photos").fetchone()["n"] == 2
+    conn.close()
+
+
+def test_review_sort_reclaim_orders_by_space_saved(client, config):
+    conn = connect(config.db_path)
+    small = make_exact_group(conn, "small", [1000, 900])  # frees ~900
+    big = make_exact_group(conn, "big", [50000, 40000])  # frees ~40000
+    conn.close()
+    page = client.get("/review/pane", params={"tier": "exact", "sort": "reclaim"}).text
+    assert page.index(f"Group {big} ·") < page.index(f"Group {small} ·")
+
+
+def test_review_variants_filter(client, config):
+    conn = connect(config.db_path)
+    plain = make_scored_group(conn, "near", "plain", [0, 2])
+    variant = make_scored_group(conn, "near", "var", [0, 3])
+    conn.execute("UPDATE groups SET color_variant = 1 WHERE id = ?", (variant,))
+    conn.commit()
+    conn.close()
+
+    all_near = client.get("/review/pane", params={"tier": "near"}).text
+    assert f"Group {plain} ·" in all_near and f"Group {variant} ·" in all_near
+
+    only_variants = client.get(
+        "/review/pane", params={"tier": "near", "variants": "1"}
+    ).text
+    assert f"Group {variant} ·" in only_variants
+    assert f"Group {plain} ·" not in only_variants
+
+
+def test_review_pane_pushes_full_reloadable_url(client, config):
+    conn = connect(config.db_path)
+    make_scored_group(conn, "near", "g", [0, 3])
+    conn.close()
+    resp = client.get(
+        "/review/pane",
+        params={"tier": "near", "reviewed": "no", "sort": "reclaim", "variants": "1"},
+    )
+    assert resp.status_code == 200
+    # htmx pushes this to the address bar so refresh/bookmark keep the view
+    push = resp.headers.get("HX-Push-Url")
+    assert push and push.startswith("/review?")
+    for part in ("tier=near", "reviewed=no", "sort=reclaim", "variants=1"):
+        assert part in push
+
+
+def test_scroll_sentinel_carries_normalized_variants(client, config):
+    conn = connect(config.db_path)
+    for i in range(REVIEW_BATCH + 2):
+        make_scored_group(conn, "near", f"g{i}", [0, 1])
+    conn.close()
+    # variants=0 is falsy: the filter is OFF, so the load-more sentinel must
+    # not flip to variants=1 on the next page (page-1/page-N must agree)
+    page = client.get("/review/pane", params={"tier": "near", "variants": "0"}).text
+    assert "loading more" in page  # a sentinel exists
+    assert "variants=1" not in page
+
+
+def test_review_pane_returns_fragment(client, config):
+    conn = connect(config.db_path)
+    make_exact_group(conn, "a", [2000, 500])
+    conn.close()
+    resp = client.get("/review/pane", params={"tier": "exact"})
+    assert resp.status_code == 200
+    assert "review-controls" in resp.text  # the filter/sort bar
+    assert "review-group" in resp.text  # the group cards
+    assert "<html" not in resp.text.lower()  # a fragment, not a whole page
+
+
+def test_workspace_landing_has_no_review_until_a_tier_is_picked(client, config):
+    conn = connect(config.db_path)
+    make_exact_group(conn, "a", [2000, 500])
+    conn.close()
+    # bare "/" is the dashboard: scan status, no split, no group cards yet
+    home = client.get("/").text
+    assert 'id="group-' not in home  # no rendered group cards
+    assert "tier-nav" in home  # the category navigation is present
+    assert "workspace split" not in home  # not split until a tier is chosen
+    # picking a tier via the query opens the split with the review rendered
+    split = client.get("/", params={"tier": "exact"}).text
+    assert 'id="group-' in split
+    assert "workspace split" in split
+
+
 def test_review_card_shows_folder_path(client, config):
     conn = connect(config.db_path)
     cur = conn.execute(

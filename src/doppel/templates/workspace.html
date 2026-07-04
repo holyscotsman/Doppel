@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="workspace{% if active_tier %} split{% endif %}" id="workspace">
+
+  <aside class="pane-left" id="scan-pane">
+    {% if needs_setup %}
+    <div class="banner">
+      Not connected to Google Drive — run the <a href="/setup">setup wizard</a>.
+    </div>
+    {% endif %}
+
+    <div class="lib-summary">
+      <div><span class="lib-num">{{ photo_count }}</span> photos</div>
+      {% if folder_id %}<div class="muted tiny">scoped to a folder</div>{% endif %}
+    </div>
+
+    <nav class="tier-nav">
+      {% for t, label in [("exact", "Exact"), ("near", "Near-dupes"), ("similar", "Similar"), ("vlm", "AI-checked")] %}
+      <a class="tier-link{% if active_tier == t %} on{% endif %}"
+         hx-get="/review/pane?tier={{ t }}" hx-target="#review-pane" hx-swap="innerHTML"
+         hx-on:click="pickTier(this)"
+         style="cursor:pointer">
+        <span class="tier-name">{{ label }}</span>
+        <span class="tier-count">{{ tier_counts.get(t, 0) }}</span>
+      </a>
+      {% endfor %}
+      <a class="tier-link trash-link" href="/trash/confirm">
+        <span class="tier-name">🗑 Trash queue{% if reclaim_total %} · {{ reclaim_total | filesizeformat }}{% endif %}</span>
+        <span class="tier-count">{{ trash_count }}</span>
+      </a>
+    </nav>
+
+    <div class="daily-scan">
+      <form method="post" action="/schedule" style="margin:0">
+        <button type="submit" class="mini-btn {% if daily_enabled %}mini-btn-on{% endif %}">
+          {% if daily_enabled %}✓ auto-scan daily: on{% else %}auto-scan daily: off{% endif %}
+        </button>
+      </form>
+      {% if last_full_scan %}<span class="muted tiny">last: {{ last_full_scan }}</span>{% endif %}
+    </div>
+
+    <div id="scan-error"></div>
+    <div id="scan-status" hx-get="/partials/scans" hx-trigger="every 2s" hx-swap="innerHTML">
+      {% include "_scan_status.html" %}
+    </div>
+  </aside>
+
+  <main class="pane-right" id="review-pane">
+    {% if active_tier %}{% include "_review_pane.html" %}{% endif %}
+  </main>
+
+</div>
+{% endblock %}

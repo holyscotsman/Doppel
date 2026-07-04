@@ -3,7 +3,7 @@
 {% endfor %}
 {% if has_more %}
 <div class="load-more"
-     hx-get="/review/groups?tier={{ tier }}&reviewed={{ reviewed }}&page={{ next_page }}"
+     hx-get="/review/groups?tier={{ tier }}&reviewed={{ reviewed }}&sort={{ sort }}&variants={{ '1' if variants else '' }}&page={{ next_page }}"
      hx-trigger="revealed" hx-swap="outerHTML">
   <p class="muted">loading more…</p>
 </div>
