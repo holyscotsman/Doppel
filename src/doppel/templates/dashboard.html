@@ -22,9 +22,15 @@
   {% endfor %}
   <div class="card">
     <div class="big">{{ trash_count }}</div>
-    <div class="label"><a href="/export">marked for trash &darr;</a></div>
+    <div class="label"><a href="/trash/confirm">marked for trash &rarr;</a></div>
   </div>
 </div>
+{% if trash_count %}
+<p style="margin:-0.4rem 0 0.6rem">
+  <a class="wz-link" href="/trash/confirm">Move {{ trash_count }} to Google Drive Trash</a>
+  <span class="muted" style="font-size:0.82rem; margin-left:0.6rem">reversible · recoverable for 30 days</span>
+</p>
+{% endif %}
 
 <h2>Scan &amp; progress</h2>
 <div class="daily-scan">

@@ -24,11 +24,13 @@ from fastapi.templating import Jinja2Templates
 from doppel.config import Config, load_config, set_config_value
 from doppel.db import connect, get_meta, set_meta
 from doppel.drive import (
+    DRIVE_WRITE_SCOPES,
     SERVICE_ACCOUNT_PATH,
     CredentialsRequired,
     FetchError,
     GoogleDriveClient,
     ImageFetcher,
+    TrashNotAuthorized,
     get_credentials,
     is_service_account_key,
     load_service_account_credentials,
@@ -219,6 +221,49 @@ def build_drive_credentials() -> object:
     )
 
 
+def build_trash_credentials() -> object:
+    """Write-scoped credentials for the move-to-trash action ONLY. Everything
+    else in the app uses the read-only credentials from build_drive_credentials.
+
+    Service-account mode reads the same key with the write scope (it can still
+    only touch folders shared with edit access). OAuth mode reuses the existing
+    token but requires it to carry the write scope — a read-only connection
+    raises TrashNotAuthorized so the UI can prompt a reconnect."""
+    mode = auth_mode()
+    if mode == "service_account":
+        return load_service_account_credentials(scopes=DRIVE_WRITE_SCOPES)
+    if mode == "oauth":
+        creds = get_credentials(allow_interactive=False)
+        granted = set(getattr(creds, "scopes", None) or [])
+        if not granted & set(DRIVE_WRITE_SCOPES):
+            raise TrashNotAuthorized(
+                "Google Drive is connected read-only. To move files to Trash, "
+                "connect with a service account (recommended) and share your "
+                "folder with edit access."
+            )
+        return creds
+    raise CredentialsRequired(
+        "Google Drive is not connected yet — finish step 1 of the setup wizard."
+    )
+
+
+def can_trash() -> bool:
+    """Whether the current connection can move files to Trash — used to gate
+    the confirm-page button. A service account is assumed able (real edit
+    access is verified per-file at trash time); OAuth needs the write scope."""
+    mode = auth_mode()
+    if mode == "service_account":
+        return True
+    if mode == "oauth":
+        try:
+            creds = get_credentials(allow_interactive=False)
+        except Exception:
+            return False
+        granted = set(getattr(creds, "scopes", None) or [])
+        return bool(granted & set(DRIVE_WRITE_SCOPES))
+    return False
+
+
 def _resolve_scan_roots(client: object, config: Config) -> list[str] | None:
     """Which folders a sync should walk, given the auth mode and scope.
 
@@ -319,6 +364,7 @@ def create_app(
     oauth_flow_factory: Callable[[str], object] | None = None,
     ollama_lister: Callable[[str], list[str]] | None = None,
     drive_client_factory: Callable[[], GoogleDriveClient] | None = None,
+    trash_client_factory: Callable[[], GoogleDriveClient] | None = None,
     enable_scheduler: bool = False,
 ) -> FastAPI:
     """Build the app. Tests inject a Config and fake factories. The daily-scan
@@ -335,6 +381,9 @@ def create_app(
     ollama_lister = ollama_lister or _list_ollama_models
     drive_client_factory = drive_client_factory or (
         lambda: GoogleDriveClient(build_drive_credentials())
+    )
+    trash_client_factory = trash_client_factory or (
+        lambda: GoogleDriveClient(build_trash_credentials())
     )
 
     app = FastAPI(title="doppel")
@@ -862,8 +911,11 @@ def create_app(
                 "SELECT tier, COUNT(*) AS n FROM groups GROUP BY tier"
             )
         }
+        # pending trash = photos still in Drive and marked trash (already-moved
+        # ones are status='trashed' and shouldn't inflate the count)
         trash_count = conn.execute(
-            "SELECT COUNT(*) AS n FROM decisions WHERE action = 'trash'"
+            "SELECT COUNT(*) AS n FROM decisions d JOIN photos p ON p.id = d.photo_id "
+            "WHERE d.action = 'trash' AND p.status = 'active'"
         ).fetchone()["n"]
         daily_enabled = get_meta(conn, "daily_scan", "off") == "on"
         last_full = conn.execute(
@@ -1388,6 +1440,77 @@ def create_app(
         conn.commit()
         return RedirectResponse(
             url=f"/review?tier={tier}&reviewed={reviewed}", status_code=303
+        )
+
+    def _pending_trash(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+        """Photos marked trash that are still live in Drive (largest first, so
+        the confirm list leads with the biggest space wins)."""
+        return conn.execute(
+            """
+            SELECT p.id, p.drive_id, p.name, p.size, p.folder_path
+            FROM decisions d JOIN photos p ON p.id = d.photo_id
+            WHERE d.action = 'trash' AND p.status = 'active'
+            ORDER BY p.size DESC, p.name
+            """
+        ).fetchall()
+
+    @app.get("/trash/confirm", response_class=HTMLResponse)
+    def trash_confirm(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+        items = _pending_trash(conn)
+        return templates.TemplateResponse(
+            request,
+            "trash_confirm.html",
+            {
+                "items": items,
+                "count": len(items),
+                "total": sum((r["size"] or 0) for r in items),
+                "can_trash": can_trash(),
+                "auth": auth_mode(),
+            },
+        )
+
+    @app.post("/trash")
+    def do_trash(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+        """Move every photo marked trash into Google Drive Trash — reversible,
+        recoverable for 30 days, never a permanent delete. Reached only from the
+        confirm page; each file is trashed independently so one failure (e.g. a
+        read-only share) doesn't abort the rest."""
+        items = _pending_trash(conn)
+        if not items:
+            return RedirectResponse("/review?tier=exact", status_code=303)
+        try:
+            client = trash_client_factory()
+        except (CredentialsRequired, TrashNotAuthorized) as exc:
+            return templates.TemplateResponse(
+                request,
+                "trash_confirm.html",
+                {
+                    "items": items,
+                    "count": len(items),
+                    "total": sum((r["size"] or 0) for r in items),
+                    "can_trash": False,
+                    "auth": auth_mode(),
+                    "error": str(exc),
+                },
+                status_code=403,
+            )
+        moved, freed, failures = 0, 0, []
+        for row in items:
+            try:
+                client.trash_file(row["drive_id"])
+            except Exception as exc:  # noqa: BLE001 — surfaced per-file to the user
+                failures.append({"name": row["name"], "error": str(exc)})
+                continue
+            conn.execute(
+                "UPDATE photos SET status = 'trashed' WHERE id = ?", (row["id"],)
+            )
+            moved += 1
+            freed += row["size"] or 0
+        conn.commit()
+        return templates.TemplateResponse(
+            request,
+            "trash_result.html",
+            {"moved": moved, "freed": freed, "failures": failures},
         )
 
     @app.get("/export")

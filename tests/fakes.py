@@ -105,6 +105,20 @@ class FakeDriveClient:
         }
 
 
+class FakeTrashClient:
+    """Records move-to-trash calls; can simulate per-file failures. Has no
+    delete method at all — proof the app only ever trashes, never hard-deletes."""
+
+    def __init__(self, fail_ids: set[str] | None = None) -> None:
+        self.trashed: list[str] = []
+        self.fail_ids = set(fail_ids or [])
+
+    def trash_file(self, drive_id: str) -> None:
+        if drive_id in self.fail_ids:
+            raise RuntimeError("insufficientFilePermissions: shared read-only")
+        self.trashed.append(drive_id)
+
+
 class FakeResponse:
     def __init__(self, status_code: int, content: bytes = b"") -> None:
         self.status_code = status_code

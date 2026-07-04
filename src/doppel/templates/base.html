@@ -209,6 +209,24 @@
     .rg-choice label { cursor: pointer; }
     .load-more { padding: 1rem; text-align: center; }
     .conf-badge { background: #2e7d32; }
+    /* move-to-trash confirm / result */
+    .note.reassure { border-left-color: #34d399; }
+    .trash-list { list-style: none; margin: 1rem 0; padding: 0; max-width: 640px;
+                  max-height: 420px; overflow-y: auto; }
+    .trash-row { display: flex; gap: 0.9rem; align-items: center;
+                 padding: 0.5rem 0.2rem; border-bottom: 1px solid #22262e; }
+    .trash-meta { min-width: 0; }
+    .trash-name { font-size: 0.9rem; overflow-wrap: anywhere; }
+    .trash-actions { display: flex; align-items: center; gap: 1.2rem;
+                     margin-top: 1.2rem; flex-wrap: wrap; }
+    .danger-btn { background: #d93838; color: #fff; font-weight: 700;
+                  font-size: 1rem; padding: 0.6rem 1.4rem; border-radius: 8px; }
+    .danger-btn:hover:not(:disabled) { background: #e85050; }
+    .danger-btn:disabled { background: #5c2b2b; color: #d7b3b3; }
+    .ghost-btn-link { color: #9aa0a6; border: 1px solid #3a3f4a; border-radius: 6px;
+                      padding: 0.5rem 1rem; }
+    .ghost-btn-link:hover { color: #e8eaed; border-color: #8ab4f8;
+                            text-decoration: none; }
     .settings-form { display: flex; flex-direction: column; gap: 0.9rem; align-items: flex-start; }
     .radio-row { display: flex; gap: 0.6rem; align-items: flex-start; font-size: 0.92rem;
                  max-width: 640px; cursor: pointer; }

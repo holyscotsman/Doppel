@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS photos (
   dhash          TEXT,
   parent_id      TEXT,     -- immediate Drive parent folder id
   folder_path    TEXT,     -- resolved 'grandparent / parent / folder' for display
-  status         TEXT NOT NULL DEFAULT 'active'  -- active | missing
+  status         TEXT NOT NULL DEFAULT 'active'  -- active | missing | trashed
 );
 CREATE INDEX IF NOT EXISTS idx_photos_md5 ON photos(md5);
 

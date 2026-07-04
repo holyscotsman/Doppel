@@ -23,8 +23,12 @@ Core: `make setup`, `make run`, `make test`, `make lint`, `make scan`.
 
 ## Rules
 
-- Drive scope is `drive.readonly`. Never request a write scope. v1 never
-  modifies anything in Drive.
+- The entire scanning pipeline (sync, thumbnails, all detection) runs on
+  `drive.readonly` and never modifies Drive. The ONLY write path is the
+  explicit, user-confirmed **move-to-trash** action, which uses a separate
+  write-scoped credential (`DRIVE_WRITE_SCOPES`) to set `trashed=true`. It is
+  reversible (recoverable in Drive Trash for 30 days) and must never permanently
+  delete or empty the Trash. Do not broaden write use beyond this.
 - All image bytes go through the `ImageFetcher` abstraction (SPEC.md):
   size-parameterized thumbnails (default 512px) cached to `cache/`.
   Original-size fetch is used by Phase 7 brand tagging only — never for

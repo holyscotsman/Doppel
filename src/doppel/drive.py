@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# Write scope used ONLY by the explicit, confirmed move-to-trash action. The
+# scanning pipeline (sync, thumbnails, detection) always runs on the read-only
+# scope above; nothing here ever deletes permanently — trashing is reversible.
+DRIVE_WRITE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 LIST_QUERY = "mimeType contains 'image/' and trashed = false"
 LIST_FIELDS = (
@@ -104,19 +108,25 @@ class CredentialsRequired(RuntimeError):
     """Interactive OAuth is needed but the caller cannot run it."""
 
 
+class TrashNotAuthorized(RuntimeError):
+    """Drive is connected read-only; moving files to Trash needs write access."""
+
+
 def load_service_account_credentials(
     path: Path | str = SERVICE_ACCOUNT_PATH,
+    scopes: list[str] | None = None,
 ) -> Any:
-    """Build read-only Drive credentials from a service-account key file.
+    """Build Drive credentials from a service-account key file.
 
-    No OAuth flow, consent screen, or token expiry — the app authenticates
-    as the service account, which sees only the folders a user has shared
-    with its email. Never log or print the key contents.
+    Defaults to the read-only scope. Pass DRIVE_WRITE_SCOPES only for the
+    move-to-trash action. No OAuth flow, consent screen, or token expiry —
+    the app authenticates as the service account, which sees only the folders
+    a user has shared with its email. Never log or print the key contents.
     """
     from google.oauth2 import service_account
 
     return service_account.Credentials.from_service_account_file(
-        str(path), scopes=SCOPES
+        str(path), scopes=scopes or SCOPES
     )
 
 
@@ -260,6 +270,17 @@ class GoogleDriveClient:
         if meta.get("mimeType") != FOLDER_MIME:
             raise ValueError(f"{meta.get('name', folder_id)!r} is not a folder")
         return meta
+
+    def trash_file(self, drive_id: str) -> None:
+        """Move a file to Google Drive Trash — reversible, recoverable for 30
+        days. This sets trashed=true; it NEVER permanently deletes. Requires a
+        write-scoped credential (see DRIVE_WRITE_SCOPES) and edit access to the
+        file; Drive raises otherwise (e.g. a folder shared read-only)."""
+        self._service.files().update(
+            fileId=self._sanitize_id(drive_id),
+            body={"trashed": True},
+            supportsAllDrives=True,
+        ).execute()
 
     def list_child_folders(self, parent_id: str) -> list[dict[str, Any]]:
         """Every subfolder directly under parent_id (paginated to completion)."""

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Moved to Trash · doppel{% endblock %}
+{% block content %}
+<h2>Moved to Google Drive Trash</h2>
+
+{% if moved %}
+<div class="note reassure">
+  <strong>{{ moved }} photo{{ 's' if moved != 1 else '' }} moved to Trash</strong>,
+  freeing {{ freed | filesizeformat }}. They're recoverable in your Google Drive
+  Trash for 30 days — open Drive and choose <b>Restore</b> to bring any back.
+</div>
+{% else %}
+<p class="muted">No photos were moved.</p>
+{% endif %}
+
+{% if failures %}
+<p class="error">{{ failures | length }} couldn't be moved
+  (often because the folder is shared read-only):</p>
+<ul class="trash-list">
+  {% for f in failures %}
+  <li class="trash-row"><div class="trash-meta">
+    <div class="trash-name">{{ f.name }}</div>
+    <div class="muted">{{ f.error }}</div>
+  </div></li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<div class="trash-actions">
+  <a class="wz-link" href="/review?tier=exact">Back to review</a>
+  <a class="ghost-btn-link" href="/">Dashboard</a>
+</div>
+{% endblock %}

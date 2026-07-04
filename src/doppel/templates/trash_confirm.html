@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Move to Trash · doppel{% endblock %}
+{% block content %}
+<h2>Move to Google Drive Trash</h2>
+
+<div class="note reassure">
+  <strong>This is reversible.</strong> Selected photos are moved to your Google
+  Drive Trash, where they stay recoverable for 30 days. doppel never permanently
+  deletes anything and never empties your Trash — you can restore any of these
+  from Drive at any time.
+</div>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if count == 0 %}
+  <p class="muted">Nothing is marked for trash yet.
+    <a href="/review?tier=exact">Go review your duplicates</a> and mark the copies
+    you don't want to keep.</p>
+{% else %}
+  <p><b>{{ count }}</b> photo{{ 's' if count != 1 else '' }} marked to trash,
+     freeing <b>{{ total | filesizeformat }}</b>.</p>
+
+  {% if not can_trash %}
+  <div class="banner">
+    {% if auth == 'oauth' %}
+      Google Drive is connected <b>read-only</b>, so doppel can't move files to
+      Trash. Reconnect with a <b>service account</b> (the recommended path) and
+      share your folder with <b>edit</b> access, then come back here.
+    {% else %}
+      Connect Google Drive first, then mark duplicates for trash.
+    {% endif %}
+    <div style="margin-top:0.6rem"><a class="wz-link" href="/setup">Open setup</a></div>
+  </div>
+  {% endif %}
+
+  <ul class="trash-list">
+    {% for p in items %}
+    <li class="trash-row">
+      <img class="thumb" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+      <div class="trash-meta">
+        <div class="trash-name">{{ p.name }}</div>
+        <div class="muted">{{ (p.size | filesizeformat) if p.size else "? size" }}</div>
+        {% if p.folder_path %}<div class="rg-path">📁 {{ p.folder_path }}</div>{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <div class="trash-actions">
+    {% if can_trash %}
+    <form method="post" action="/trash" style="margin:0"
+          onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Moving…';">
+      <button type="submit" class="danger-btn">
+        Move {{ count }} photo{{ 's' if count != 1 else '' }} to Trash
+      </button>
+    </form>
+    {% endif %}
+    <a class="ghost-btn-link" href="/review?tier=exact">Back to review</a>
+  </div>
+{% endif %}
+{% endblock %}
