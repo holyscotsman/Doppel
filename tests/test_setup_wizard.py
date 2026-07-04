@@ -27,7 +27,6 @@ drive_folder_id = ""
 host = "http://127.0.0.1:11434"
 model = "test-model"
 adjudicate_band_min = 0.85
-brand_review_max_confidence = 0.6
 """
 
 VALID_CLIENT_JSON = json.dumps(

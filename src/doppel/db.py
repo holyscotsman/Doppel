@@ -61,19 +61,9 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS tags (
-  photo_id   INTEGER NOT NULL REFERENCES photos(id),
-  kind       TEXT NOT NULL,            -- 'brand'
-  value      TEXT NOT NULL,
-  confidence REAL,
-  source     TEXT NOT NULL,            -- vlm | human
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (photo_id, kind)
-);
-
 CREATE TABLE IF NOT EXISTS vlm_results (
   id             INTEGER PRIMARY KEY,
-  task           TEXT NOT NULL,        -- adjudicate | brand
+  task           TEXT NOT NULL,        -- adjudicate
   photo_id       INTEGER NOT NULL REFERENCES photos(id),
   photo_id_b     INTEGER REFERENCES photos(id),  -- adjudicate only
   model          TEXT NOT NULL,

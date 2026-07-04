@@ -270,25 +270,6 @@ def test_startup_reconciles_orphaned_running_scans(config) -> None:
     assert row["error"] == "interrupted"
 
 
-def test_brand_redirect_urlencodes_filter(config) -> None:
-    app = create_app(
-        config=config, fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir)
-    )
-    with TestClient(app) as ui:
-        conn = connect(config.db_path)
-        pid = insert_photo(conn, "p", md5="m")
-        conn.close()
-
-        resp = ui.post(
-            f"/photos/{pid}/brand",
-            data={"value": "H&M", "brand": "H&M", "queue": "1"},
-            follow_redirects=False,
-        )
-
-        assert resp.status_code == 303
-        assert resp.headers["location"] == "/brands/photos?brand=H%26M&queue=1"
-
-
 def test_decisions_ignore_malformed_field_names(config) -> None:
     app = create_app(
         config=config, fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir)

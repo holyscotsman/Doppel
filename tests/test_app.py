@@ -252,63 +252,6 @@ def test_adjudicate_stage_via_ui_shows_verdict(config) -> None:
         assert "variant" in detail.text
 
 
-def test_brand_pages_filter_and_correction(config) -> None:
-    from tests.fakes import FakeImageFetcher, FakeVlm
-
-    conn = connect(config.db_path)
-    confident = insert_photo(conn, "c1", name="jacket.jpg", md5="a")
-    doubtful = insert_photo(conn, "d1", name="blurry.jpg", md5="b")
-    conn.close()
-
-    app = create_app(
-        config=config,
-        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
-        vlm_factory=lambda cfg: FakeVlm(
-            [
-                {"brand": "Patagonia", "evidence": "chest logo", "confidence": 0.95},
-                {"brand": "Nike", "evidence": "maybe a swoosh", "confidence": 0.3},
-            ]
-        ),
-    )
-    with TestClient(app) as ui:
-        resp = ui.post("/scans/brand")
-        assert resp.status_code == 200
-        app.state.runner.wait(timeout=10)
-
-        summary = ui.get("/brands")
-        assert "Patagonia" in summary.text
-        assert "Nike" in summary.text
-        assert "review queue: 1 tag" in summary.text
-
-        queue = ui.get("/brands/photos", params={"queue": 1})
-        assert "blurry.jpg" in queue.text
-        assert "jacket.jpg" not in queue.text
-
-        filtered = ui.get("/brands/photos", params={"brand": "Patagonia"})
-        assert "jacket.jpg" in filtered.text
-        assert "blurry.jpg" not in filtered.text
-
-        # human correction from the queue
-        resp = ui.post(
-            f"/photos/{doubtful}/brand",
-            data={"value": "Under Armour", "queue": "1"},
-            follow_redirects=False,
-        )
-        assert resp.status_code == 303
-
-        conn = connect(config.db_path)
-        tag = conn.execute(
-            "SELECT value, source FROM tags WHERE photo_id = ?", (doubtful,)
-        ).fetchone()
-        conn.close()
-        assert (tag["value"], tag["source"]) == ("Under Armour", "human")
-
-        # corrected tag leaves the low-confidence queue
-        queue = ui.get("/brands/photos", params={"queue": 1})
-        assert "blurry.jpg" not in queue.text
-    _ = confident
-
-
 def test_run_full_scan_chains_pipeline(config, tmp_path, monkeypatch) -> None:
     """One 'Run full scan' click runs sync -> exact -> near -> similar."""
     import numpy as np

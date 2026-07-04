@@ -12,7 +12,6 @@ class OllamaConfig:
     host: str
     model: str
     adjudicate_band_min: float
-    brand_review_max_confidence: float
 
 
 @dataclass(frozen=True)
@@ -48,7 +47,6 @@ def load_config(path: Path | str = "config.toml") -> Config:
             host=ollama["host"],
             model=ollama["model"],
             adjudicate_band_min=ollama["adjudicate_band_min"],
-            brand_review_max_confidence=ollama["brand_review_max_confidence"],
         ),
     )
 
