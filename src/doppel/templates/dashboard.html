@@ -27,8 +27,23 @@
 </div>
 
 <h2>Scan &amp; progress</h2>
+<div class="daily-scan">
+  <form method="post" action="/schedule" style="margin:0">
+    <button type="submit" class="mini-btn {% if daily_enabled %}mini-btn-on{% endif %}">
+      {% if daily_enabled %}✓ auto-scan daily: on{% else %}auto-scan daily: off{% endif %}
+    </button>
+  </form>
+  <span class="muted">
+    {% if daily_enabled %}A full scan runs automatically once a day while doppel is open.
+    {% else %}Turn on to run a full scan automatically once a day.{% endif %}
+    {% if last_full_scan %} Last full scan: {{ last_full_scan }}.{% endif %}
+  </span>
+</div>
 <div id="scan-error"></div>
 <div id="scan-status" hx-get="/partials/scans" hx-trigger="every 2s" hx-swap="innerHTML">
   {% include "_scan_status.html" %}
 </div>
+<p class="muted" style="font-size:0.8rem; margin-top:0.6rem">The daily auto-scan runs
+  only while doppel is open. To scan on a schedule even when it's closed, have your OS
+  keep <code>make run</code> alive (launchd on macOS, Task Scheduler on Windows).</p>
 {% endblock %}

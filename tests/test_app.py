@@ -370,3 +370,35 @@ def test_dashboard_shows_elapsed_for_running_scan(client, config):
     page = client.get("/")
     assert "elapsed" in page.text
     assert "left" in page.text  # ETA rendered while running
+
+
+def test_scan_is_due_logic():
+    from datetime import UTC, datetime, timedelta
+
+    from doppel.app import scan_is_due
+
+    now = datetime.now(UTC)
+    assert scan_is_due(False, None, now) is False  # disabled -> never
+    assert scan_is_due(True, None, now) is True  # enabled, never scanned
+    assert scan_is_due(True, now - timedelta(hours=25), now) is True  # stale
+    assert scan_is_due(True, now - timedelta(hours=2), now) is False  # recent
+
+
+def test_daily_scan_toggle_persists(client, config):
+    from doppel.db import connect as db_connect
+    from doppel.db import get_meta
+
+    # off by default; the dashboard shows the off state
+    assert "auto-scan daily: off" in client.get("/").text
+
+    resp = client.post("/schedule", follow_redirects=False)
+    assert resp.status_code == 303
+    conn = db_connect(config.db_path)
+    assert get_meta(conn, "daily_scan") == "on"
+    conn.close()
+    assert "auto-scan daily: on" in client.get("/").text
+
+    client.post("/schedule")  # toggle back off
+    conn = db_connect(config.db_path)
+    assert get_meta(conn, "daily_scan") == "off"
+    conn.close()

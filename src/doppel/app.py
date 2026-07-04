@@ -6,6 +6,7 @@ from __future__ import annotations
 import html
 import sqlite3
 import threading
+import traceback
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from doppel.config import Config, load_config, set_config_value
-from doppel.db import connect
+from doppel.db import connect, get_meta, set_meta
 from doppel.drive import (
     SERVICE_ACCOUNT_PATH,
     CredentialsRequired,
@@ -116,6 +117,53 @@ def _scan_timing(scan: dict | None) -> tuple[str | None, str | None]:
         if remaining > 0:
             eta = _fmt_duration(remaining)
     return _fmt_duration(max(elapsed, 0)), eta
+
+
+def scan_is_due(
+    enabled: bool,
+    last_run: datetime | None,
+    now: datetime,
+    period_hours: float = 24,
+) -> bool:
+    """Should the daily auto-scan fire? Only when enabled and the last scan
+    was at least `period_hours` ago (or there was never one)."""
+    if not enabled:
+        return False
+    if last_run is None:
+        return True
+    return (now - last_run).total_seconds() >= period_hours * 3600
+
+
+class DailyScheduler:
+    """A daemon thread that fires a scan roughly once a day while the app is
+    running. It only nudges — the trigger no-ops if a job is already going or
+    Drive isn't connected, and it re-checks every interval."""
+
+    def __init__(
+        self,
+        is_due: Callable[[], bool],
+        trigger: Callable[[], None],
+        interval: float = 600.0,
+    ) -> None:
+        self._is_due = is_due
+        self._trigger = trigger
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                if self._is_due():
+                    self._trigger()
+            except Exception:
+                traceback.print_exc()
 
 
 def auth_mode() -> str | None:
@@ -241,8 +289,10 @@ def create_app(
     oauth_flow_factory: Callable[[str], object] | None = None,
     ollama_lister: Callable[[str], list[str]] | None = None,
     drive_client_factory: Callable[[], GoogleDriveClient] | None = None,
+    enable_scheduler: bool = False,
 ) -> FastAPI:
-    """Build the app. Tests inject a Config and fake factories."""
+    """Build the app. Tests inject a Config and fake factories. The daily-scan
+    scheduler thread only starts when enable_scheduler is set (real runs)."""
     config = config or load_config(config_path)
     fetcher_factory = fetcher_factory or _build_real_fetcher
     embedder_factory = embedder_factory or (lambda cfg: ClipEmbedder(cfg.clip_model))
@@ -409,6 +459,42 @@ def create_app(
                     return
         finally:
             conn.close()
+
+    def _daily_scan_due() -> bool:
+        conn = connect(config.db_path)
+        try:
+            enabled = get_meta(conn, "daily_scan", "off") == "on"
+            row = conn.execute(
+                "SELECT started_at FROM scans WHERE stage = 'sync' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        last = None
+        if row and row["started_at"]:
+            try:
+                last = datetime.fromisoformat(row["started_at"])
+            except ValueError:
+                last = None
+        return scan_is_due(enabled, last, datetime.now(UTC))
+
+    def _trigger_daily_scan() -> None:
+        if auth_mode() is None:
+            return  # nothing to scan until Drive is connected
+        # start() no-ops if a job is already running
+        app.state.runner.start("all", lambda: run_stage_job("all"))
+
+    app.state.scheduler = None
+    if enable_scheduler:
+        app.state.scheduler = DailyScheduler(_daily_scan_due, _trigger_daily_scan)
+        app.state.scheduler.start()
+
+    @app.post("/schedule")
+    def toggle_schedule(conn: sqlite3.Connection = Depends(get_conn)):
+        """Turn the daily automatic full scan on or off."""
+        current = get_meta(conn, "daily_scan", "off")
+        set_meta(conn, "daily_scan", "off" if current == "on" else "on")
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/setup", response_class=HTMLResponse)
     def setup(
@@ -710,6 +796,11 @@ def create_app(
         trash_count = conn.execute(
             "SELECT COUNT(*) AS n FROM decisions WHERE action = 'trash'"
         ).fetchone()["n"]
+        daily_enabled = get_meta(conn, "daily_scan", "off") == "on"
+        last_full = conn.execute(
+            "SELECT finished_at FROM scans WHERE stage = 'sync' AND status = 'done' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -721,6 +812,8 @@ def create_app(
                 "any_running": app.state.runner.running_stage() is not None,
                 "needs_setup": auth_mode() is None,
                 "folder_id": config.drive_folder_id,
+                "daily_enabled": daily_enabled,
+                "last_full_scan": last_full["finished_at"] if last_full else None,
             },
         )
 
@@ -1247,5 +1340,6 @@ def create_app(
 
 
 def build() -> FastAPI:
-    """uvicorn factory target (see Makefile run)."""
-    return create_app()
+    """uvicorn factory target (see Makefile run). Real runs get the daily-scan
+    scheduler; tests construct create_app() directly without it."""
+    return create_app(enable_scheduler=True)

@@ -91,6 +91,24 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+def get_meta(
+    conn: sqlite3.Connection, key: str, default: str | None = None
+) -> str | None:
+    """Read a value from the small key/value meta table."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Write a value to the meta table."""
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
 def ensure_vec_schema(conn: sqlite3.Connection) -> None:
     """Load the sqlite-vec extension and create the embeddings virtual table.
 
