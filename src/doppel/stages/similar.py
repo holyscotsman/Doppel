@@ -12,6 +12,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from doppel.config import Config
 from doppel.db import ensure_vec_schema
@@ -65,7 +66,19 @@ def _embed_missing(
     clip_batch = max(1, perf.clip_batch or BATCH_SIZE)
 
     def fetch_one(row: sqlite3.Row) -> Path:
-        return fetcher.get(row["drive_id"], config.thumb_size)
+        path = fetcher.get(row["drive_id"], config.thumb_size)
+        # embedder.embed() decodes on the MAIN thread, outside parallel_map's
+        # per-item guard, so one undecodable file there would crash the whole
+        # stage. Decode here in the worker instead: a bad file raises (and is
+        # yielded as a skippable per-item error), and we drop the poisoned cache
+        # entry so the next run re-fetches it fresh through the validated path.
+        try:
+            with Image.open(path) as img:
+                img.load()
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return path
 
     processed = 0
     buf_rows: list[sqlite3.Row] = []

@@ -28,7 +28,7 @@ def make_fetcher(db_path, tmp_path, client, session):
     fetcher = DriveImageFetcher(
         db_path=db_path,
         client=client,
-        session=session,
+        session_factory=lambda: session,
         cache_dir=tmp_path / "cache",
         sleep=sleeps.append,
     )
@@ -55,13 +55,14 @@ def test_cache_hit_never_touches_network(db_path, tmp_path) -> None:
 
 
 def test_fetch_rewrites_size_and_records_thumb_path(db_path, tmp_path) -> None:
-    session = FakeSession([FakeResponse(200, b"jpegdata")])
+    body = jpeg_bytes()
+    session = FakeSession([FakeResponse(200, body)])
     fetcher, _ = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
 
     path = fetcher.get("pic1", 512)
 
     assert session.requests == ["https://lh3.example/abc=s512"]
-    assert path.read_bytes() == b"jpegdata"
+    assert path.read_bytes() == body
     conn = connect(db_path)
     row = conn.execute(
         "SELECT thumb_path FROM photos WHERE drive_id = 'pic1'"
@@ -70,7 +71,8 @@ def test_fetch_rewrites_size_and_records_thumb_path(db_path, tmp_path) -> None:
 
 
 def test_expired_link_refreshes_and_retries_once(db_path, tmp_path) -> None:
-    session = FakeSession([FakeResponse(404), FakeResponse(200, b"fresh")])
+    body = jpeg_bytes()
+    session = FakeSession([FakeResponse(404), FakeResponse(200, body)])
     client = FakeThumbClient(link="https://lh3.example/new=s220")
     fetcher, _ = make_fetcher(db_path, tmp_path, client, session)
 
@@ -81,7 +83,7 @@ def test_expired_link_refreshes_and_retries_once(db_path, tmp_path) -> None:
         "https://lh3.example/abc=s512",
         "https://lh3.example/new=s512",
     ]
-    assert path.read_bytes() == b"fresh"
+    assert path.read_bytes() == body
     conn = connect(db_path)
     row = conn.execute(
         "SELECT thumbnail_link FROM photos WHERE drive_id = 'pic1'"
@@ -106,14 +108,15 @@ def test_no_thumbnail_link_falls_back_to_downscaled_original(tmp_path) -> None:
 
 
 def test_backoff_on_transient_errors(db_path, tmp_path) -> None:
+    body = jpeg_bytes()
     session = FakeSession(
-        [FakeResponse(500), FakeResponse(429), FakeResponse(200, b"ok")]
+        [FakeResponse(500), FakeResponse(429), FakeResponse(200, body)]
     )
     fetcher, sleeps = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
 
     path = fetcher.get("pic1", 512)
 
-    assert path.read_bytes() == b"ok"
+    assert path.read_bytes() == body
     assert sleeps == [1, 2]
 
 
@@ -197,10 +200,126 @@ def test_client_errors_surface_as_fetch_error(db_path, tmp_path) -> None:
 
 
 def test_no_partial_cache_files_left_behind(db_path, tmp_path) -> None:
-    session = FakeSession([FakeResponse(200, b"data")])
+    session = FakeSession([FakeResponse(200, jpeg_bytes())])
     fetcher, _ = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
 
     fetcher.get("pic1", 512)
 
     leftovers = list((tmp_path / "cache").glob("*.part"))
     assert leftovers == []
+
+
+def test_non_image_200_body_is_not_cached(db_path, tmp_path) -> None:
+    """A 200 whose body is not a decodable image (CDN error page, truncated
+    body) must raise instead of caching poison — otherwise it becomes a
+    permanent cache hit that crashes the decode stage on every resume."""
+    session = FakeSession([FakeResponse(200, b"<html>rate limited</html>")])
+    fetcher, _ = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
+
+    with pytest.raises(FetchError):
+        fetcher.get("pic1", 512)
+
+    # nothing poisonous (and no temp .part) left behind — the item can retry
+    assert not (tmp_path / "cache" / "pic1_512.jpg").exists()
+    assert list((tmp_path / "cache").glob("*.part")) == []
+
+
+def test_client_service_is_built_with_a_socket_timeout(monkeypatch) -> None:
+    """The per-thread Drive service must sit on a timeout-bounded httplib2
+    socket; without it a stalled get_thumbnail_link/download_file would hang a
+    worker (and wedge the whole stage) forever."""
+    import google_auth_httplib2
+    import googleapiclient.discovery
+    import httplib2
+
+    from doppel.drive import GoogleDriveClient
+
+    captured: dict[str, object] = {}
+
+    class FakeHttp:
+        def __init__(self, timeout=None) -> None:
+            captured["timeout"] = timeout
+
+    monkeypatch.setattr(httplib2, "Http", FakeHttp)
+    monkeypatch.setattr(
+        google_auth_httplib2, "AuthorizedHttp", lambda creds, http=None: http
+    )
+    monkeypatch.setattr(
+        googleapiclient.discovery, "build", lambda *a, **k: ("service", k.get("http"))
+    )
+
+    service = GoogleDriveClient(credentials="dummy")._service
+
+    assert captured["timeout"] == GoogleDriveClient._TIMEOUT_S == 30
+    assert isinstance(service[1], FakeHttp)  # service built over the bounded http
+
+
+def test_session_is_per_thread(db_path, tmp_path) -> None:
+    """Each worker thread must get its OWN session — sharing one requests/
+    AuthorizedSession across the fetch thread pool corrupts the TLS stream and
+    crashed real scans (WRONG_VERSION_NUMBER / unreadable image / segfault).
+    Within a thread the session is reused (per-thread keep-alive)."""
+    import threading
+
+    built: list[int] = []
+    build_lock = threading.Lock()
+
+    def factory() -> FakeSession:
+        with build_lock:
+            built.append(threading.get_ident())
+        return FakeSession([])
+
+    fetcher = DriveImageFetcher(
+        db_path=db_path,
+        client=FakeThumbClient(),
+        session_factory=factory,
+        cache_dir=tmp_path / "cache",
+    )
+
+    # hold a strong ref to each thread's session so none is GC'd mid-test —
+    # otherwise id() could be reused across threads and give a false collision
+    per_thread_session: dict[int, FakeSession] = {}
+    start = threading.Barrier(4)  # release all threads at once to force overlap
+
+    def grab() -> None:
+        start.wait()
+        first = fetcher._session
+        assert fetcher._session is first  # reused within the same thread
+        per_thread_session[threading.get_ident()] = first
+
+    threads = [threading.Thread(target=grab) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    sessions = list(per_thread_session.values())
+    assert len(per_thread_session) == 4  # four distinct threads
+    assert len({id(s) for s in sessions}) == 4  # each got its own session object
+    assert sorted(built) == sorted(per_thread_session)  # built once per thread
+
+
+def test_transient_transport_error_is_retried(db_path, tmp_path) -> None:
+    """A dropped connection / read timeout on a per-thread session is transient,
+    so the fetcher backs off and retries instead of dropping the photo."""
+
+    class FlakySession:
+        def __init__(self, fail_times: int, then: FakeResponse) -> None:
+            self.fail_times = fail_times
+            self.then = then
+            self.calls = 0
+
+        def get(self, url: str, timeout: object = None) -> FakeResponse:
+            self.calls += 1
+            if self.calls <= self.fail_times:
+                raise ConnectionError("connection reset by peer")
+            return self.then
+
+    session = FlakySession(2, FakeResponse(200, jpeg_bytes()))
+    fetcher, sleeps = make_fetcher(db_path, tmp_path, FakeThumbClient(), session)
+
+    path = fetcher.get("pic1", 512)
+
+    assert path.exists()
+    assert session.calls == 3  # two failures, then success
+    assert sleeps == [1, 2]  # exponential backoff before each retry

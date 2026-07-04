@@ -6,6 +6,7 @@ Scope is drive.readonly — v1 never modifies anything in Drive.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -206,9 +207,40 @@ class GoogleDriveClient:
     """Real Drive client. Everything network-facing lives behind this."""
 
     def __init__(self, credentials: Any) -> None:
-        from googleapiclient.discovery import build
+        # httplib2, the transport under googleapiclient, is NOT thread-safe: two
+        # threads sharing one service object interleave on the same TLS socket
+        # and corrupt the stream. That surfaces as WRONG_VERSION_NUMBER, garbled
+        # response bytes (an unreadable image), or a hard OpenSSL segfault that
+        # kills the whole process. The deep scans fan fetches out across a thread
+        # pool, so each thread lazily builds and reuses its OWN service from the
+        # shared (thread-safe) credentials.
+        self._credentials = credentials
+        self._local = threading.local()
 
-        self._service = build("drive", "v3", credentials=credentials)
+    # httplib2's default socket has NO timeout, so a stalled Drive connection
+    # (a routine thumbnail-link refresh, or the original-bytes download fallback)
+    # would hang a worker thread indefinitely — and a hung worker silently wedges
+    # the whole stage, since the pool never sees it finish. Bound every socket at
+    # this many seconds so a stuck call fails fast; the fetcher turns that failure
+    # into a FetchError the stage records and skips.
+    _TIMEOUT_S = 30
+
+    @property
+    def _service(self) -> Any:
+        service = getattr(self._local, "service", None)
+        if service is None:
+            import google_auth_httplib2
+            import httplib2
+            from googleapiclient.discovery import build
+
+            # a per-thread AuthorizedHttp over a timeout-bounded httplib2 socket;
+            # http= carries the auth, so credentials= must not also be passed.
+            authed_http = google_auth_httplib2.AuthorizedHttp(
+                self._credentials, http=httplib2.Http(timeout=self._TIMEOUT_S)
+            )
+            service = build("drive", "v3", http=authed_http, cache_discovery=False)
+            self._local.service = service
+        return service
 
     def list_images_page(
         self,
@@ -394,20 +426,38 @@ class DriveImageFetcher:
     """
 
     MAX_ATTEMPTS = 4
+    # (connect, read) timeouts in seconds: a hung socket must never wedge a
+    # worker thread for the rest of the scan. Generous, since the thumbnail CDN
+    # is normally fast — this only trips on a genuinely stuck connection.
+    TIMEOUT = (10, 30)
 
     def __init__(
         self,
         db_path: Path | str,
         client: ThumbnailClient,
-        session: Any,
+        session_factory: Callable[[], Any],
         cache_dir: Path | str,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._db_path = db_path
         self._client = client
-        self._session = session
+        # requests/AuthorizedSession is not thread-safe. The deep scans fetch
+        # from a thread pool, so each worker thread lazily builds and then
+        # reuses its OWN session (per-thread keep-alive is also a big speed win:
+        # one TLS handshake per thread, then warm-connection reuse, instead of a
+        # fresh handshake per image).
+        self._session_factory = session_factory
+        self._local = threading.local()
         self._cache_dir = Path(cache_dir)
         self._sleep = sleep
+
+    @property
+    def _session(self) -> Any:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._session_factory()
+            self._local.session = session
+        return session
 
     def get(self, drive_id: str, size: int | Literal["orig"] = 512) -> Path:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -440,6 +490,13 @@ class DriveImageFetcher:
                         f"thumbnail fetch for {drive_id} failed "
                         f"with HTTP {resp.status_code}"
                     )
+                # a 200 is not proof of an image: the CDN can hand back an HTML
+                # interstitial, and a torn keep-alive read or truncated body can
+                # slip through. Decoding here keeps a non-image OUT of the cache —
+                # otherwise it becomes a permanent cache hit that crashes the
+                # embed stage (which decodes on the main thread, outside the
+                # per-item guard) on every resume, wedging the scan for good.
+                self._ensure_decodable(drive_id, resp.content)
                 self._write_atomic(path, resp.content)
                 self._record_thumb_path(drive_id, path)
                 return path
@@ -449,20 +506,45 @@ class DriveImageFetcher:
         self._record_thumb_path(drive_id, path)
         return path
 
+    @staticmethod
+    def _ensure_decodable(drive_id: str, data: bytes) -> None:
+        """Raise FetchError unless ``data`` fully decodes as an image. verify()
+        alone misses truncation, so force a full decode with load()."""
+        import io
+
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(data)) as img:
+                img.load()
+        except Exception as exc:  # noqa: BLE001 — any decode failure = not an image
+            raise FetchError(
+                f"thumbnail for {drive_id} returned HTTP 200 but the body was "
+                f"not a decodable image ({type(exc).__name__})"
+            ) from exc
+
     def _request(self, url: str, retry_403: bool = False) -> Any:
-        """GET with exponential backoff on 429/5xx (and 403 when asked)."""
+        """GET with exponential backoff on 429/5xx (and 403 when asked), and on
+        transient transport errors (reset connection, read timeout). With a
+        per-thread session those errors are genuinely transient rather than
+        shared-state corruption, so a short retry recovers instead of dropping
+        the photo — only a persistent failure surfaces as FetchError."""
         resp = None
         for attempt in range(self.MAX_ATTEMPTS):
+            last = attempt == self.MAX_ATTEMPTS - 1
             try:
-                resp = self._session.get(url)
-            except Exception as exc:
-                raise FetchError(f"thumbnail request failed: {exc}") from exc
+                resp = self._session.get(url, timeout=self.TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 — retried, then surfaced as FetchError
+                if last:
+                    raise FetchError(f"thumbnail request failed: {exc}") from exc
+                self._sleep(2**attempt)
+                continue
             retryable = (
                 resp.status_code == 429
                 or 500 <= resp.status_code < 600
                 or (retry_403 and resp.status_code == 403)
             )
-            if retryable and attempt < self.MAX_ATTEMPTS - 1:
+            if retryable and not last:
                 self._sleep(2**attempt)
                 continue
             return resp

@@ -365,10 +365,12 @@ def _build_real_fetcher(config: Config) -> ImageFetcher:
     from doppel.drive import DriveImageFetcher
 
     creds = build_drive_credentials()
+    # a factory, not a single session: the fetcher builds one AuthorizedSession
+    # per worker thread (requests sessions are not thread-safe).
     return DriveImageFetcher(
         db_path=config.db_path,
         client=GoogleDriveClient(creds),
-        session=AuthorizedSession(creds),
+        session_factory=lambda: AuthorizedSession(creds),
         cache_dir=config.cache_dir,
     )
 

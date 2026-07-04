@@ -105,8 +105,14 @@ def _hash_missing(
 
     def fetch_and_hash(row: sqlite3.Row) -> tuple[str, str]:
         path = fetcher.get(row["drive_id"], config.thumb_size)
-        with Image.open(path) as img:
-            return compute_hashes(img)
+        try:
+            with Image.open(path) as img:
+                return compute_hashes(img)
+        except Exception:
+            # a poisoned/torn cache file: drop it so the next run re-fetches
+            # fresh (the fetcher validates the new bytes before re-caching)
+            path.unlink(missing_ok=True)
+            raise
 
     perf = config.perf
     processed = 0

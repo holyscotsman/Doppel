@@ -14,14 +14,17 @@ host = "http://127.0.0.1:11434"
 model = "gemma3:27b"         # any pulled multi-image vision model
 adjudicate_band_min = 0.85   # pairs in [this, similar_cosine_min) go to the VLM
 
-# How hard to push the machine during the deeper scans. Worker counts default
-# to your CPU core count when omitted, so you usually don't need this section —
-# raise the numbers to go faster on a big machine, lower them to leave headroom.
+# How hard to push the machine during the deeper scans. The fetch/hash/prefetch
+# pools are network-I/O bound, so they default to 4x your CPU cores (capped at
+# 32), NOT the core count — a worker mostly waits on an HTTPS round trip, so
+# more of them means more throughput. Each worker has its own connection, so
+# raising these is safe; lower them only if the Drive CDN starts rate-limiting
+# you (the fetcher already backs off on 429). Uncomment to override.
 [perf]
 clip_batch = 64            # images per GPU pass when embedding; 64 suits 24GB+
-# fetch_workers = 10       # parallel thumbnail downloads (I/O bound)
-# hash_workers = 10        # parallel fetch + pHash/dHash in the near stage
-# embed_fetch_workers = 10 # prefetch threads feeding the CLIP batcher
+# fetch_workers = 32       # parallel thumbnail downloads (network-I/O bound)
+# hash_workers = 32        # parallel fetch + pHash/dHash in the near stage
+# embed_fetch_workers = 32 # prefetch threads feeding the CLIP batcher
 # db_batch = 100           # rows per sqlite transaction from the single writer
 # adjudicate_workers = 3   # fetch + VLM threads (Ollama is one local server)
-# queue_maxsize = 40       # bounded worker->writer handoff depth
+# queue_maxsize = 64       # bounded worker->writer handoff depth

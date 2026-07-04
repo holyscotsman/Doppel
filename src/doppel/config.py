@@ -57,6 +57,15 @@ def load_config(path: Path | str = "config.toml") -> Config:
     ollama = raw["ollama"]
     perf = raw.get("perf", {})
     cpu = os.cpu_count() or 4
+    # Thumbnail fetching is network-I/O bound, not CPU bound: a worker spends
+    # almost all its time waiting on an HTTPS round trip, so useful concurrency
+    # far exceeds the core count. Default the fetch/hash/prefetch pools to 4x
+    # cores (capped at 32 to stay polite to the Drive thumbnail CDN, which the
+    # fetcher already backs off from on 429). This is only safe now that each
+    # worker holds its own connection — before, extra threads just corrupted a
+    # shared socket and crashed the scan. Raise these in [perf] if your link
+    # has headroom and you are not being rate-limited.
+    io_workers = min(32, cpu * 4)
     return Config(
         thumb_size=raw["thumb_size"],
         near_hamming_max=raw["near_hamming_max"],
@@ -73,13 +82,13 @@ def load_config(path: Path | str = "config.toml") -> Config:
             adjudicate_band_min=ollama["adjudicate_band_min"],
         ),
         perf=PerfConfig(
-            fetch_workers=perf.get("fetch_workers", cpu),
-            hash_workers=perf.get("hash_workers", cpu),
-            embed_fetch_workers=perf.get("embed_fetch_workers", cpu),
+            fetch_workers=perf.get("fetch_workers", io_workers),
+            hash_workers=perf.get("hash_workers", io_workers),
+            embed_fetch_workers=perf.get("embed_fetch_workers", io_workers),
             clip_batch=perf.get("clip_batch", 32),
             db_batch=perf.get("db_batch", 100),
             adjudicate_workers=perf.get("adjudicate_workers", 3),
-            queue_maxsize=perf.get("queue_maxsize", 4 * cpu),
+            queue_maxsize=perf.get("queue_maxsize", max(4 * cpu, 2 * io_workers)),
         ),
         resume_overlap=raw.get("resume_overlap", 3),
     )

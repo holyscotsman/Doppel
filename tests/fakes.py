@@ -132,7 +132,7 @@ class FakeSession:
         self.responses = list(responses)
         self.requests: list[str] = []
 
-    def get(self, url: str) -> FakeResponse:
+    def get(self, url: str, timeout: object = None) -> FakeResponse:
         self.requests.append(url)
         return self.responses.pop(0)
 
