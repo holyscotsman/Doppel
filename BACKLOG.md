@@ -51,3 +51,23 @@ phase's acceptance criteria.
   currently looks like a hang), and consider lowering the default to
   `min(16, cpu*2)` with 32 as an opt-in ceiling. **Needs human tuning on the
   real photo library.**
+
+## Review-page query optimizations (from the Phases 0–6 code review)
+
+- **`review_all` / `review_batch` / `set_group_reviewed` are N+1.** They loop the
+  filtered groups and call `_group_context` (3–4 queries) + `_finalize_group`
+  (one upsert per member) per group, holding the sqlite writer for the whole
+  loop. Sub-second on a personal library but linear in group count. Rewrite the
+  default-fill as one set-based `INSERT ... SELECT` guarded by `NOT EXISTS` (to
+  preserve manual decisions), and/or chunk the commit.
+
+- **`_review_page_ids` total-count does needless work.** The `COUNT(*)` wraps the
+  full base query (a `JOIN photos` + `MIN/MAX(score)` aggregates) that a row
+  count doesn't need, and there's no index on `groups(tier)` so the outer query
+  scans groups. Compute the count from a lean subquery (no photos join, no score
+  aggregates) and add `CREATE INDEX idx_groups_tier ON groups(tier)`. Pre-existing
+  (not introduced by the phase work); read-only and sub-second today.
+
+- **Optional `idx_photos_folder_path`.** The brand-folder palette query was fixed
+  (MIN(id) instead of a correlated subquery); an index on `photos(folder_path)`
+  would speed its `GROUP BY` further if the library grows very large.

@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS group_members (
   score    REAL,                 -- hamming dist or cosine sim vs group anchor
   PRIMARY KEY (group_id, photo_id)
 );
+-- the PK leads with group_id, so a lookup by photo_id (the move-to-trash
+-- "is this photo's group reviewed?" check) would otherwise scan the table
+CREATE INDEX IF NOT EXISTS idx_group_members_photo ON group_members(photo_id);
 
 CREATE TABLE IF NOT EXISTS decisions (
   photo_id   INTEGER PRIMARY KEY REFERENCES photos(id),

@@ -46,6 +46,7 @@ def test_boost_perf_keys_are_valid_perfconfig_fields() -> None:
 def test_boost_perf_actually_boosts_over_the_defaults() -> None:
     base = PerfConfig()
     boosted = dataclasses.replace(base, **BOOST_PERF)
-    assert boosted.fetch_workers == 64 and boosted.clip_batch == 96
-    assert boosted.fetch_workers > base.fetch_workers
+    # the stages read hash_workers (near) and embed_fetch_workers (similar)
+    assert boosted.hash_workers == 64 and boosted.clip_batch == 96
+    assert boosted.embed_fetch_workers > base.embed_fetch_workers
     assert boosted.queue_maxsize >= base.queue_maxsize

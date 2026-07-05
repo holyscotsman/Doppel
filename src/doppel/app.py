@@ -83,6 +83,7 @@ def _app_version() -> str:
         pass
     return f"v{VERSION}" + (f" · {sha}" if sha else "")
 
+
 # stages the UI can launch, in pipeline order; extended phase by phase
 UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
 
@@ -90,24 +91,28 @@ UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
 PIPELINE_STAGES = ["sync", "exact", "near", "similar"]
 
 
-def _pipeline_start_index(conn: sqlite3.Connection) -> int:
+def _pipeline_start_index(
+    conn: sqlite3.Connection, stages: list[str] | None = None
+) -> int:
     """Where to begin the 'all' pipeline. A fresh run — or one whose last attempt
     fully completed — starts at sync (a full re-scan picks up new Drive files).
     A RESUME after a downstream failure skips the leading stages that are already
     'done' (above all the slow Drive re-list) and restarts at the first stage
     that isn't done, so a Stage-3 failure resumes at Stage 3 instead of replaying
-    Stage 1."""
+    Stage 1. `stages` defaults to PIPELINE_STAGES; a caller can pass a longer
+    effective pipeline so a later appended stage resumes correctly too."""
+    stages = stages or PIPELINE_STAGES
     status: dict[str, str | None] = {}
-    for st in PIPELINE_STAGES:
+    for st in stages:
         row = conn.execute(
             "SELECT status FROM scans WHERE stage = ? ORDER BY id DESC LIMIT 1",
             (st,),
         ).fetchone()
         status[st] = row["status"] if row else None
     # no completed sync yet, or the whole pipeline already finished -> full restart
-    if status["sync"] != "done" or all(status[st] == "done" for st in PIPELINE_STAGES):
+    if status[stages[0]] != "done" or all(status[st] == "done" for st in stages):
         return 0
-    for i, st in enumerate(PIPELINE_STAGES):
+    for i, st in enumerate(stages):
         if status[st] != "done":
             return i
     return 0
@@ -136,7 +141,8 @@ LIGHTBOX_SIZE = 1600
 # on purpose — the fetcher jitters and logs its 429 backoff — and toggled from the
 # dashboard. On a large library this trades politeness to the Drive CDN for speed.
 BOOST_PERF = {
-    "fetch_workers": 64,
+    # the stages read hash_workers (near) and embed_fetch_workers (similar) for
+    # their fetch pools — fetch_workers is not wired to a stage, so it's omitted
     "hash_workers": 64,
     "embed_fetch_workers": 64,
     "clip_batch": 96,
@@ -1305,6 +1311,15 @@ def create_app(
         ids, total, stats = _review_page_ids(
             conn, tier, reviewed, sort, variants, page=page, limit=limit
         )
+        total_pages = max(1, -(-total // BATCH_PAGE)) if mode == "batch" else 1
+        if mode == "batch" and page > total_pages:
+            # the filtered set shrank under us (e.g. after reviewing a page in
+            # the 'to review' filter) — snap back to the last non-empty page
+            # instead of stranding the user on an empty pane
+            page = total_pages
+            ids, total, stats = _review_page_ids(
+                conn, tier, reviewed, sort, variants, page=page, limit=limit
+            )
         groups = [_group_context(conn, gid) for gid in ids]
         reclaim_total = conn.execute(
             """
@@ -1313,7 +1328,6 @@ def create_app(
             WHERE d.action = 'trash' AND p.status = 'active'
             """
         ).fetchone()["n"]
-        total_pages = max(1, -(-total // BATCH_PAGE)) if mode == "batch" else 1
         return {
             "tier": tier,
             "reviewed": reviewed,
@@ -1973,11 +1987,22 @@ def create_app(
         variants: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        """Mark every group in the tier reviewed: commit each group's shown
-        selection, filling undecided members with the default keep/trash choice
-        without overwriting a manual one."""
-        for row in conn.execute("SELECT id FROM groups WHERE tier = ?", (tier,)):
-            ctx = _group_context(conn, row["id"])
+        """Mark every group in the CURRENT view reviewed — honouring the
+        reviewed and color-variants filters — by committing each group's shown
+        selection and filling undecided members with the default without
+        overwriting a manual one. Scoping to the filter matters: a 'color
+        variants only' view must never commit trash decisions on the groups it
+        hides from the user."""
+        ids, _, _ = _review_page_ids(
+            conn,
+            tier,
+            reviewed,
+            resolve_sort(tier, sort or ""),
+            _truthy(variants),
+            limit=None,
+        )
+        for gid in ids:
+            ctx = _group_context(conn, gid)
             if ctx is not None:
                 _finalize_group(conn, ctx)
         conn.commit()
@@ -1992,13 +2017,24 @@ def create_app(
         variants: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        """Clear every decision in the tier, so no group reads as reviewed."""
-        conn.execute(
-            "DELETE FROM decisions WHERE photo_id IN ("
-            "  SELECT m.photo_id FROM group_members m "
-            "  JOIN groups g ON g.id = m.group_id WHERE g.tier = ?)",
-            (tier,),
+        """Clear the decisions of the groups in the CURRENT view (same reviewed
+        + color-variants scope as Review all), so they read as unreviewed."""
+        ids, _, _ = _review_page_ids(
+            conn,
+            tier,
+            reviewed,
+            resolve_sort(tier, sort or ""),
+            _truthy(variants),
+            limit=None,
         )
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                "DELETE FROM decisions WHERE photo_id IN ("  # noqa: S608
+                "  SELECT photo_id FROM group_members "
+                f"  WHERE group_id IN ({placeholders}))",
+                ids,
+            )
         conn.commit()
         return _pane_response(request, conn, tier, reviewed, sort, variants)
 

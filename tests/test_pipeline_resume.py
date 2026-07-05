@@ -55,6 +55,18 @@ def test_unfinished_sync_forces_full_restart(tmp_path) -> None:
     assert _pipeline_start_index(conn) == 0  # can't resume on a bad inventory
 
 
+def test_resume_walks_an_effective_pipeline_with_an_appended_stage(tmp_path) -> None:
+    # Brandarr appends 'classify' to the 'all' run when brand folders are set; a
+    # classify-only failure must resume at classify, not replay the sync re-list
+    conn = connect(tmp_path / "d.db")
+    for st in PIPELINE_STAGES:
+        _record_scan(conn, st, "done")
+    _record_scan(conn, "classify", "failed")
+    effective = [*PIPELINE_STAGES, "classify"]
+    idx = _pipeline_start_index(conn, effective)
+    assert effective[idx] == "classify"
+
+
 def test_rate_estimator_uses_recent_window() -> None:
     est = _RateEstimator()
     assert est.rate("near", 1, 0, 0.0) is None  # one sample -> no rate yet

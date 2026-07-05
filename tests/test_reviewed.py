@@ -144,3 +144,36 @@ def test_all_at_once_mode_has_no_batch_controls(client, config, group) -> None:
     client.post("/review/mode?mode=all&tier=exact", headers={"HX-Request": "1"})
     pane = client.get("/review/pane?tier=exact")
     assert "Review this batch" not in pane.text
+
+
+def test_review_all_honors_the_color_variants_filter(client, config) -> None:
+    """Review-all in a 'color variants only' view must NOT commit trash decisions
+    on the non-variant groups it hides from the user."""
+    conn = connect(config.db_path)
+    ids = {}
+    for k in ("va", "vb", "pa", "pb"):
+        ids[k] = insert_photo(conn, k, name=f"{k}.jpg", size=100 if k[1] == "a" else 50)
+    gv = conn.execute(
+        "INSERT INTO groups (tier, color_variant, created_at) VALUES ('near', 1, 't')"
+    ).lastrowid
+    gp = conn.execute(
+        "INSERT INTO groups (tier, color_variant, created_at) VALUES ('near', 0, 't')"
+    ).lastrowid
+    for g, a, b in ((gv, "va", "vb"), (gp, "pa", "pb")):
+        conn.execute(
+            "INSERT INTO group_members (group_id, photo_id, score) "
+            "VALUES (?, ?, 0), (?, ?, 4)",
+            (g, ids[a], g, ids[b]),
+        )
+    conn.commit()
+    conn.close()
+
+    client.post(
+        "/review/reviewed-all?tier=near&variants=1", headers={"HX-Request": "1"}
+    )
+
+    decided = _decisions(config)
+    assert ids["va"] in decided and ids["vb"] in decided  # variant group finalized
+    assert (
+        ids["pa"] not in decided and ids["pb"] not in decided
+    )  # hidden group untouched
