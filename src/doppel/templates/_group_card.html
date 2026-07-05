@@ -32,7 +32,8 @@
         hx-target="#group-{{ g.group.id }}" hx-swap="outerHTML">
     {% for p in g.members %}
     <div class="rg-photo {{ g.selected[p.id] }}">
-      <img class="thumb-lg" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+      <img class="thumb-lg" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}"
+           data-full="/photo/{{ p.id }}/full" title="Click to view larger">
       <div class="rg-meta">
         <div class="rg-name">{{ p.name }}</div>
         <div class="muted">
@@ -40,8 +41,16 @@
           {{ (p.size | filesizeformat) if p.size else "? size" }}
         </div>
         {% if p.folder_path %}
-        <div class="rg-path" title="{{ p.folder_path }}">📁 {{ p.folder_path }}</div>
+          {% if p.parent_id %}
+          <a class="rg-path" href="https://drive.google.com/drive/folders/{{ p.parent_id }}"
+             target="_blank" rel="noopener"
+             title="Open “{{ p.folder_path }}” in Google Drive">📁 {{ p.folder_path }} ↗</a>
+          {% else %}
+          <div class="rg-path" title="{{ p.folder_path }}">📁 {{ p.folder_path }}</div>
+          {% endif %}
         {% endif %}
+        <a class="rg-drivelink" href="https://drive.google.com/file/d/{{ p.drive_id }}/view"
+           target="_blank" rel="noopener">open in Drive ↗</a>
       </div>
       <div class="rg-choice">
         <label><input type="radio" name="action_{{ p.id }}" value="keep"

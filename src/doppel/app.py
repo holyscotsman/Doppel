@@ -106,6 +106,9 @@ REVIEW_BATCH = 8
 # groups per page in "batch" display mode (paged, not infinite scroll)
 BATCH_PAGE = 200
 REVIEW_MODES = ("scroll", "all", "batch")
+# larger preview served to the review lightbox — a size-parameterized thumbnail
+# (never the original), so clicking a photo stays fast and within the fetcher
+LIGHTBOX_SIZE = 1600
 
 REVIEWED_FILTERS = {
     "all": "",
@@ -2042,6 +2045,27 @@ def create_app(
             # blip). Logged so a burst of these is visible in logs/, not a 502
             # that just looks like a broken image.
             log.warning("thumb %s fetch failed: %s", photo_id, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return FileResponse(path, media_type="image/jpeg")
+
+    @app.get("/photo/{photo_id}/full")
+    def photo_full(
+        photo_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+        fetcher: ImageFetcher = Depends(get_fetcher),
+    ):
+        """A larger preview for the review lightbox (clicking a thumbnail). Still
+        a size-parameterized thumbnail, not the original — fast, and it keeps
+        original bytes off this path per the ImageFetcher contract."""
+        row = conn.execute(
+            "SELECT drive_id FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such photo")
+        try:
+            path = fetcher.get(row["drive_id"], LIGHTBOX_SIZE)
+        except FetchError as exc:
+            log.warning("full photo %s fetch failed: %s", photo_id, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return FileResponse(path, media_type="image/jpeg")
 

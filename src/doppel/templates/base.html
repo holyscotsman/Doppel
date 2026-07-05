@@ -254,6 +254,27 @@
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rg-choice { display: flex; gap: 0.9rem; margin-top: 0.5rem; font-size: 0.9rem; }
     .rg-choice label { cursor: pointer; }
+    a.rg-path:hover { color: #a5c6fb; text-decoration: none; }
+    .rg-drivelink { display: inline-block; margin-top: 0.25rem; font-size: 0.74rem; }
+    .rg-reviewed { display: inline-flex; align-items: center; gap: 0.35rem;
+                   font-size: 0.82rem; color: #c8ccd2; cursor: pointer; }
+    .rg-photo .thumb-lg { cursor: zoom-in; }
+    .review-modes { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+                    margin-bottom: 0.7rem; font-size: 0.85rem; }
+    .mini-btn.on { background: #1c2635; color: #fff; border-color: #8ab4f8; }
+    .mini-btn.danger { border-color: #5c2b2b; color: #f0a0a0; }
+    .mini-btn.danger:hover { background: #3a1e1e; border-color: #d93838; color: #fff; }
+    .mini-btn[disabled] { opacity: 0.4; cursor: default; }
+    .batch-bar { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+    .batch-nav { display: flex; align-items: center; gap: 1rem; }
+    .lightbox { position: fixed; inset: 0; z-index: 1000; display: flex;
+                align-items: center; justify-content: center; padding: 2rem;
+                background: rgba(6,8,12,0.93); cursor: zoom-out; }
+    .lightbox[hidden] { display: none; }
+    .lightbox img { max-width: 96vw; max-height: 90vh; object-fit: contain;
+                    border-radius: 8px; box-shadow: 0 10px 44px rgba(0,0,0,0.65); }
+    .lb-cap { position: fixed; bottom: 1rem; left: 0; right: 0; text-align: center;
+              color: #c8ccd2; font-size: 0.85rem; pointer-events: none; }
     .load-more { padding: 1rem; text-align: center; }
     .conf-badge { background: #2e7d32; }
     /* move-to-trash confirm / result */
@@ -306,5 +327,33 @@
 <main>
 {% block content %}{% endblock %}
 </main>
+<div id="lightbox" class="lightbox" hidden>
+  <img id="lightbox-img" src="" alt="">
+  <div class="lb-cap" id="lightbox-cap"></div>
+</div>
+<script>
+  // Click any review thumbnail to view it larger in a non-blocking overlay —
+  // the scan keeps running underneath. Event-delegated because cards load via
+  // htmx. Click anywhere on the overlay or press Escape to close.
+  (function () {
+    var lb = document.getElementById('lightbox');
+    var img = document.getElementById('lightbox-img');
+    var cap = document.getElementById('lightbox-cap');
+    function closeLb() { lb.hidden = true; img.src = ''; }
+    document.addEventListener('click', function (e) {
+      var thumb = e.target.closest('img[data-full]');
+      if (thumb) {
+        img.src = thumb.dataset.full;
+        cap.textContent = thumb.alt || '';
+        lb.hidden = false;
+        return;
+      }
+      if (!lb.hidden && e.target.closest('#lightbox')) closeLb();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !lb.hidden) closeLb();
+    });
+  })();
+</script>
 </body>
 </html>
