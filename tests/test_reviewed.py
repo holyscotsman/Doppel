@@ -121,13 +121,18 @@ def test_scroll_is_the_default_mode(client, config, group) -> None:
     assert "Review this batch" not in pane.text  # batch controls are hidden
 
 
-def test_batch_mode_shows_paging_and_batch_select(client, config, group) -> None:
+def test_batch_mode_makes_review_this_batch_the_primary_action(
+    client, config, group
+) -> None:
     resp = client.post(
         "/review/mode?mode=batch&tier=exact", headers={"HX-Request": "1"}
     )
     assert resp.status_code == 200
-    assert "Review this batch" in resp.text
-    assert "Select all batches" in resp.text
+    # in batch mode the prominent action reviews only this batch, with an
+    # explicit "all groups" option beside it (not a bare "Review all")
+    assert "Review all in this batch" in resp.text
+    assert "Review all 1 groups" in resp.text
+    assert "/review/reviewed-batch" in resp.text
 
 
 def test_review_this_batch_marks_the_page(client, config, group) -> None:

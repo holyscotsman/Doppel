@@ -35,8 +35,17 @@ def setup_diagnostics(logs_dir: Path | str = "logs", app_name: str = "doppel") -
     logs.mkdir(parents=True, exist_ok=True)
 
     if _crash_file is None:
-        # append so successive crashes accumulate; line-buffered to flush early
+        # append so successive crashes accumulate across runs (never truncated),
+        # line-buffered to flush early. A timestamped marker per run makes a
+        # captured native trace attributable to the run that produced it.
+        import datetime
+
         _crash_file = open(logs / "crash.log", "a", buffering=1)  # noqa: SIM115
+        _crash_file.write(
+            f"\n=== {app_name} run started "
+            f"{datetime.datetime.now().isoformat(timespec='seconds')} ===\n"
+        )
+        _crash_file.flush()
         faulthandler.enable(file=_crash_file, all_threads=True)
 
     root = logging.getLogger()

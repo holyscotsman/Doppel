@@ -40,16 +40,31 @@
 </div>
 
 <div class="review-actions">
+  {% if mode == 'batch' %}
+  <button type="button" class="mini-btn mini-btn-on"
+          hx-post="/review/reviewed-batch?{{ qs }}&page={{ page }}"
+          hx-target="#review-pane" hx-swap="innerHTML"
+          title="Mark only the {{ groups | length }} groups on this page (batch {{ page }}) reviewed">
+    Review all in this batch ({{ groups | length }})
+  </button>
+  <button type="button" class="mini-btn"
+          hx-post="/review/reviewed-all?{{ qs }}"
+          hx-target="#review-pane" hx-swap="innerHTML"
+          title="Mark every group across all {{ total_pages }} batches reviewed">
+    Review all {{ total }} groups
+  </button>
+  {% else %}
   <button type="button" class="mini-btn"
           hx-post="/review/reviewed-all?{{ qs }}"
           hx-target="#review-pane" hx-swap="innerHTML"
           title="Mark every group reviewed, keeping the preselected copy in each">
     Review all
   </button>
+  {% endif %}
   <button type="button" class="mini-btn"
           hx-post="/review/unreviewed-all?{{ qs }}"
           hx-target="#review-pane" hx-swap="innerHTML"
-          title="Clear every keep/trash decision in this tier">
+          title="Clear every keep/trash decision in the current view">
     Mark all unreviewed
   </button>
   <a href="/trash/confirm" class="mini-btn danger">🗑 Move to Trash</a>
@@ -63,32 +78,16 @@
   {% include "_review_batch.html" %}
 </div>
 
-{% if mode == 'batch' and groups %}
+{% if mode == 'batch' and groups and total_pages > 1 %}
 <div class="batch-bar">
-  {% if total_pages > 1 %}
   <div class="batch-nav">
     <button type="button" class="mini-btn"{% if page <= 1 %} disabled{% endif %}
             hx-get="/review/pane?{{ qs }}&page={{ page - 1 }}"
             hx-target="#review-pane" hx-swap="innerHTML">‹ Prev</button>
-    <span class="muted">Page {{ page }} of {{ total_pages }}</span>
+    <span class="muted">Page {{ page }} of {{ total_pages }} · reviewing this batch marks these {{ groups | length }}</span>
     <button type="button" class="mini-btn"{% if page >= total_pages %} disabled{% endif %}
             hx-get="/review/pane?{{ qs }}&page={{ page + 1 }}"
             hx-target="#review-pane" hx-swap="innerHTML">Next ›</button>
-  </div>
-  {% endif %}
-  <div class="review-actions">
-    <button type="button" class="mini-btn"
-            hx-post="/review/reviewed-batch?{{ qs }}&page={{ page }}"
-            hx-target="#review-pane" hx-swap="innerHTML"
-            title="Mark just the {{ groups | length }} groups on this page reviewed">
-      Review this batch ({{ groups | length }})
-    </button>
-    <button type="button" class="mini-btn"
-            hx-post="/review/reviewed-all?{{ qs }}"
-            hx-target="#review-pane" hx-swap="innerHTML"
-            title="Mark every group in every batch reviewed">
-      Select all batches
-    </button>
   </div>
 </div>
 {% endif %}
