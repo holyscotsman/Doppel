@@ -10,6 +10,7 @@
   from Drive at any time.
 </div>
 
+{% if msg %}<div class="note reassure">{{ msg }}</div>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 {% if count == 0 %}
@@ -20,15 +21,23 @@
   <p><b>{{ count }}</b> photo{{ 's' if count != 1 else '' }} marked to trash,
      freeing <b>{{ total | filesizeformat }}</b>.</p>
 
-  {% if not can_trash %}
+  {% if owner_connected %}
+  <div class="note reassure">
+    ✓ Connected as <b>you</b> (the file owner) for trashing — doppel moves
+    these to your own Google Drive Trash.
+  </div>
+  {% elif not can_trash and auth == 'oauth' %}
   <div class="banner">
-    {% if auth == 'oauth' %}
-      Google Drive is connected <b>read-only</b>, so doppel can't move files to
-      Trash yet. Reconnect your Google account granting <b>write</b> access — as
-      the file's owner you can then trash your own duplicates.
-    {% else %}
-      Connect Google Drive first, then mark duplicates for trash.
-    {% endif %}
+    Google Drive is connected <b>read-only</b>, so doppel can't move files to
+    Trash yet. Connect your Google account with <b>write</b> access — as the
+    file's owner you can then trash your own duplicates.
+    <form method="post" action="/oauth/trash/start" style="margin-top:0.6rem">
+      <button type="submit" class="danger-btn">🔑 Connect my Google account</button>
+    </form>
+  </div>
+  {% elif not can_trash %}
+  <div class="banner">
+    Connect Google Drive first, then come back to trash.
     <div style="margin-top:0.6rem"><a class="wz-link" href="/setup">Open setup</a></div>
   </div>
   {% elif auth == 'service_account' %}
@@ -36,8 +45,11 @@
     <strong>Heads up:</strong> you're connected with a <b>service account</b>.
     It can read your library, but Google Drive only lets a file's <em>owner</em>
     move it to Trash — a service account isn't the owner of your personal files,
-    so this may fail for files you own. If it does, connect your own Google
-    account (with write access) so doppel can trash them as you.
+    so this will fail for files you own. Connect your own Google account (the
+    owner) to trash them reliably:
+    <form method="post" action="/oauth/trash/start" style="margin-top:0.6rem">
+      <button type="submit" class="danger-btn">🔑 Connect my Google account</button>
+    </form>
   </div>
   {% endif %}
 

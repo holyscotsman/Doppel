@@ -203,3 +203,105 @@ def test_service_account_failure_explains_ownership(config, monkeypatch):
     assert "No photos were moved" in resp.text
     assert "service account" in resp.text  # the systemic explanation banner
     assert "owner" in resp.text.lower()
+    assert "/oauth/trash/start" in resp.text  # offers the owner sign-in
+
+
+# ---- write-scoped owner sign-in (#trash OAuth) --------------------------
+
+
+class _FakeWriteCreds:
+    def to_json(self) -> str:
+        return '{"token": "fake-write"}'
+
+
+class _FakeWriteFlow:
+    """Stand-in for the write-scoped Google OAuth flow."""
+
+    def __init__(self) -> None:
+        self.credentials = _FakeWriteCreds()
+        self.code: str | None = None
+
+    def authorization_url(self, **kwargs):
+        return "https://accounts.google.com/o/oauth2/write", "st-write"
+
+    def fetch_token(self, code: str) -> None:
+        self.code = code
+
+
+@pytest.fixture
+def trash_oauth(config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "credentials.json").write_text("{}")  # presence check only
+    flow = _FakeWriteFlow()
+    app = create_app(
+        config=config,
+        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
+        trash_oauth_flow_factory=lambda redirect_uri: flow,
+    )
+    with TestClient(app) as c:
+        c.flow = flow
+        c.tmp = tmp_path
+        yield c
+
+
+def test_owner_token_is_preferred_over_scanning_credential(config, monkeypatch):
+    """When a write-scoped owner token is connected, the trash action uses it —
+    not the service account — because only the owner can trash their files."""
+    import doppel.app as appmod
+
+    monkeypatch.setattr(appmod, "auth_mode", lambda: "service_account")
+    sentinel = object()
+    monkeypatch.setattr(appmod, "load_trash_oauth_credentials", lambda: sentinel)
+    assert appmod.build_trash_credentials() is sentinel
+    assert appmod.can_trash() is True
+    assert appmod.trash_owner_connected() is True
+
+
+def test_connect_trash_account_starts_write_flow(trash_oauth):
+    resp = trash_oauth.post("/oauth/trash/start", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith(
+        "https://accounts.google.com/o/oauth2/write"
+    )
+
+
+def test_trash_oauth_callback_writes_a_separate_write_token(trash_oauth):
+    trash_oauth.post("/oauth/trash/start", follow_redirects=False)  # sets pending state
+    resp = trash_oauth.get(
+        "/oauth/callback?state=st-write&code=code-w", follow_redirects=False
+    )
+    assert resp.status_code == 303
+    assert "/trash/confirm" in resp.headers["location"]  # back to the trash page
+    # the write token is stored SEPARATELY so it never disturbs the scan token
+    assert (
+        trash_oauth.tmp / "token_write.json"
+    ).read_text() == '{"token": "fake-write"}'
+    assert not (trash_oauth.tmp / "token.json").exists()
+
+
+def test_trash_start_without_credentials_sends_to_setup(config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no credentials.json present
+    app = create_app(
+        config=config, fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir)
+    )
+    with TestClient(app) as c:
+        resp = c.post("/oauth/trash/start", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/setup" in resp.headers["location"]
+
+
+def test_confirm_page_offers_owner_signin_in_service_account_mode(config, monkeypatch):
+    import doppel.app as appmod
+
+    monkeypatch.setattr(appmod, "auth_mode", lambda: "service_account")
+    monkeypatch.setattr(appmod, "trash_owner_connected", lambda: False)
+    app = create_app(
+        config=config, fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir)
+    )
+    conn = connect(config.db_path)
+    mark_trash(conn, "a", 100)
+    conn.close()
+    with TestClient(app) as c:
+        page = c.get("/trash/confirm")
+    assert "service account" in page.text
+    assert "/oauth/trash/start" in page.text  # the connect button is offered

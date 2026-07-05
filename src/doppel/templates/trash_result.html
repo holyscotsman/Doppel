@@ -16,14 +16,20 @@
 {% if failures %}
 <p class="error">{{ failures | length }} couldn't be moved:</p>
 
-{% if owner_blocked and auth == 'service_account' %}
+{% if owner_blocked and not owner_connected %}
 <div class="banner">
-  <strong>Why did these fail?</strong> doppel is connected with a
+  <strong>Why did these fail?</strong>
+  {% if auth == 'service_account' %}doppel is connected with a
   <b>service account</b> — it can read your library, but it doesn't <b>own</b>
-  your files, and Google Drive only lets a file's <em>owner</em> move it to
-  Trash. To trash your own duplicates, doppel needs to act as <b>you</b>
-  (the owner) by connecting your Google account with write access. Files owned
-  by someone else and shared with you can't be trashed by anyone but their owner.
+  your files, and Google Drive only lets a file's <em>owner</em> move it to Trash.
+  {% else %}Google Drive only lets a file's <em>owner</em> move it to Trash, and
+  the connected account isn't the owner of these files.{% endif %}
+  To trash your own duplicates, connect your Google account (the owner) with
+  write access. Files owned by someone else and shared with you can't be trashed
+  by anyone but their owner.
+  <form method="post" action="/oauth/trash/start" style="margin-top:0.6rem">
+    <button type="submit" class="danger-btn">🔑 Connect my Google account</button>
+  </form>
 </div>
 {% endif %}
 

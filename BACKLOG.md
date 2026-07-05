@@ -71,3 +71,16 @@ phase's acceptance criteria.
 - **Optional `idx_photos_folder_path`.** The brand-folder palette query was fixed
   (MIN(id) instead of a correlated subquery); an index on `photos(folder_path)`
   would speed its `GROUP BY` further if the library grows very large.
+
+## Move-to-Trash (follow-ups from the write-OAuth work)
+
+- **`load_trash_oauth_credentials()` is called twice per confirm-page load** —
+  once via `can_trash()` and once via `trash_owner_connected()`. Each reads the
+  token file (and may refresh it, though refresh is gated on a local expiry
+  check, so no network unless the token is actually expired). Trivial; memoize
+  per-request or compute the owner-connected flag once and thread it through.
+
+- **Preflight `capabilities.canTrash` before the trash loop.** Instead of firing
+  a doomed `files.update` per non-owned file and classifying the 403, fetch
+  `capabilities/canTrash,ownedByMe` up front (store during sync or a cheap
+  `files.get`) so the confirm page can warn precisely and skip doomed calls.

@@ -95,14 +95,21 @@ def collect_folder_tree(client: DriveClient, root_id: str) -> list[str]:
     return sorted(seen)
 
 
-def web_auth_flow(credentials_path: Path | str, redirect_uri: str) -> Any:
+def web_auth_flow(
+    credentials_path: Path | str,
+    redirect_uri: str,
+    scopes: list[str] | None = None,
+) -> Any:
     """OAuth flow for the setup wizard: the consent redirect comes back to
     our own /oauth/callback route instead of a throwaway local server.
-    Desktop-app OAuth clients accept any loopback redirect."""
+    Desktop-app OAuth clients accept any loopback redirect.
+
+    Defaults to the read-only SCOPES. Pass DRIVE_WRITE_SCOPES for the separate
+    move-to-trash sign-in, where the user authorizes as the file OWNER."""
     from google_auth_oauthlib.flow import Flow
 
     return Flow.from_client_secrets_file(
-        str(credentials_path), scopes=SCOPES, redirect_uri=redirect_uri
+        str(credentials_path), scopes=scopes or SCOPES, redirect_uri=redirect_uri
     )
 
 
@@ -233,6 +240,45 @@ def get_credentials(
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
         creds = flow.run_local_server(port=0, open_browser=True)
         token_path.write_text(creds.to_json())
+    return creds
+
+
+TRASH_TOKEN_PATH = "token_write.json"
+
+
+def load_trash_oauth_credentials(token_path: Path | str = TRASH_TOKEN_PATH) -> Any:
+    """The write-scoped OAuth token used ONLY by move-to-trash. The user signs in
+    as themselves — the file OWNER — so Google Drive permits trashed=true on their
+    own files (a service account never can). Kept in a SEPARATE token file so it
+    never disturbs the read-only scanning connection.
+
+    Returns valid credentials, or None when the token is absent, corrupt, expired
+    beyond refresh, or missing the write scope. Refreshes in place when possible.
+    Never log or print the token contents."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
+    token_path = Path(token_path)
+    if not token_path.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(
+            str(token_path), DRIVE_WRITE_SCOPES
+        )
+    except (ValueError, KeyError):
+        return None
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json())
+        except RefreshError:
+            return None
+    if not creds or not creds.valid:
+        return None
+    granted = set(getattr(creds, "scopes", None) or [])
+    if not granted & set(DRIVE_WRITE_SCOPES):
+        return None  # a read-only token can't trash — treat as not connected
     return creds
 
 

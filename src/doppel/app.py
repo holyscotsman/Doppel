@@ -41,6 +41,7 @@ from doppel.drive import (
     get_credentials,
     is_service_account_key,
     load_service_account_credentials,
+    load_trash_oauth_credentials,
     parse_folder_input,
     service_account_email,
     web_auth_flow,
@@ -427,50 +428,43 @@ def build_trash_credentials() -> object:
     """Write-scoped credentials for the move-to-trash action ONLY. Everything
     else in the app uses the read-only credentials from build_drive_credentials.
 
-    Service-account mode reads the same key with the write scope (it can still
-    only touch folders shared with edit access). OAuth mode reuses the existing
-    token but requires it to carry the write scope — a read-only connection
-    raises TrashNotAuthorized so the UI can prompt a reconnect."""
+    A write-scoped OAuth sign-in as the user (the file OWNER) takes precedence:
+    it's the only identity that can trash the user's own My Drive files, so it's
+    preferred over the scanning credential whenever it's connected. Falling back:
+    a service account reads its key with the write scope (works only for content
+    it actually owns or a shared drive it manages); a read-only OAuth connection
+    raises TrashNotAuthorized so the UI can prompt the owner sign-in."""
+    owner = load_trash_oauth_credentials()
+    if owner is not None:
+        return owner
     mode = auth_mode()
     if mode == "service_account":
         return load_service_account_credentials(scopes=DRIVE_WRITE_SCOPES)
     if mode == "oauth":
-        # NOTE: the OAuth flow only ever requests the read-only SCOPES, and
-        # get_credentials loads the token forcing those same scopes — so an
-        # OAuth connection can never satisfy this check today (it fails closed
-        # into TrashNotAuthorized, which is safe). Service-account mode is the
-        # supported trash path. If OAuth trashing is ever wanted, add a
-        # write-scoped consent flow AND load the token with its real granted
-        # scopes, or this check will keep rejecting a genuinely-granted token.
-        creds = get_credentials(allow_interactive=False)
-        granted = set(getattr(creds, "scopes", None) or [])
-        if not granted & set(DRIVE_WRITE_SCOPES):
-            raise TrashNotAuthorized(
-                "Google Drive is connected read-only. To move files to Trash, "
-                "connect with a service account (recommended) and share your "
-                "folder with edit access."
-            )
-        return creds
+        raise TrashNotAuthorized(
+            "Google Drive is connected read-only. To move files to Trash, connect "
+            "your Google account with write access (you're the owner, so you can "
+            "trash your own files)."
+        )
     raise CredentialsRequired(
         "Google Drive is not connected yet — finish step 1 of the setup wizard."
     )
 
 
 def can_trash() -> bool:
-    """Whether the current connection can move files to Trash — used to gate
-    the confirm-page button. A service account is assumed able (real edit
-    access is verified per-file at trash time); OAuth needs the write scope."""
-    mode = auth_mode()
-    if mode == "service_account":
+    """Whether the current connection can move files to Trash — used to gate the
+    confirm-page button. A write-scoped owner sign-in can always trash; a service
+    account is assumed able for its own content (verified per-file at trash time);
+    a read-only OAuth connection cannot."""
+    if load_trash_oauth_credentials() is not None:
         return True
-    if mode == "oauth":
-        try:
-            creds = get_credentials(allow_interactive=False)
-        except Exception:
-            return False
-        granted = set(getattr(creds, "scopes", None) or [])
-        return bool(granted & set(DRIVE_WRITE_SCOPES))
-    return False
+    return auth_mode() == "service_account"
+
+
+def trash_owner_connected() -> bool:
+    """True when a write-scoped OAuth token (the file owner) is connected, so the
+    trash action runs as the user rather than the scanning service account."""
+    return load_trash_oauth_credentials() is not None
 
 
 def _resolve_scan_roots(client: object, config: Config) -> list[str] | None:
@@ -641,6 +635,7 @@ def create_app(
     vlm_factory: Callable[[Config], VlmClient] | None = None,
     config_path: Path | str = "config.toml",
     oauth_flow_factory: Callable[[str], object] | None = None,
+    trash_oauth_flow_factory: Callable[[str], object] | None = None,
     ollama_lister: Callable[[str], list[str]] | None = None,
     drive_client_factory: Callable[[], GoogleDriveClient] | None = None,
     trash_client_factory: Callable[[], GoogleDriveClient] | None = None,
@@ -661,6 +656,11 @@ def create_app(
     )
     oauth_flow_factory = oauth_flow_factory or (
         lambda redirect_uri: web_auth_flow("credentials.json", redirect_uri)
+    )
+    trash_oauth_flow_factory = trash_oauth_flow_factory or (
+        lambda redirect_uri: web_auth_flow(
+            "credentials.json", redirect_uri, scopes=DRIVE_WRITE_SCOPES
+        )
     )
     ollama_lister = ollama_lister or _list_ollama_models
     drive_client_factory = drive_client_factory or (
@@ -1169,6 +1169,27 @@ def create_app(
         app.state.oauth = {"state": state, "redirect_uri": redirect_uri}
         return RedirectResponse(auth_url, status_code=303)
 
+    @app.post("/oauth/trash/start")
+    def oauth_trash_start(request: Request):
+        """Begin the SEPARATE write-scoped sign-in used only to move files to
+        Trash. The user consents as themselves (the file owner); the resulting
+        token lands in token_write.json and never touches the scan connection."""
+        if not Path("credentials.json").exists():
+            return RedirectResponse(
+                "/setup?err=upload+credentials.json+first", status_code=303
+            )
+        redirect_uri = str(request.url_for("oauth_callback"))
+        flow = trash_oauth_flow_factory(redirect_uri)
+        auth_url, state = flow.authorization_url(
+            access_type="offline", prompt="consent"
+        )
+        app.state.oauth = {
+            "state": state,
+            "redirect_uri": redirect_uri,
+            "kind": "trash",
+        }
+        return RedirectResponse(auth_url, status_code=303)
+
     @app.get("/oauth/callback", name="oauth_callback")
     def oauth_callback(
         request: Request,
@@ -1191,16 +1212,26 @@ def create_app(
                 "/setup?err=" + quote("authorization expired — click authorize again"),
                 status_code=303,
             )
-        flow = oauth_flow_factory(pending["redirect_uri"])
+        is_trash = pending.get("kind") == "trash"
+        factory = trash_oauth_flow_factory if is_trash else oauth_flow_factory
+        token_file = "token_write.json" if is_trash else "token.json"
+        dest = "/trash/confirm" if is_trash else "/setup"
+        flow = factory(pending["redirect_uri"])
         try:
             flow.fetch_token(code=code)
-            Path("token.json").write_text(flow.credentials.to_json())
+            Path(token_file).write_text(flow.credentials.to_json())
         except Exception as exc:
             return RedirectResponse(
-                "/setup?err=" + quote(f"token exchange failed: {exc}"),
+                dest + "?err=" + quote(f"token exchange failed: {exc}"),
                 status_code=303,
             )
         app.state.oauth = None
+        if is_trash:
+            # the write token only powers move-to-trash; nothing to rebuild
+            return RedirectResponse(
+                dest + "?msg=" + quote("Google account connected — you can trash now"),
+                status_code=303,
+            )
         with init_lock:
             app.state.fetcher = None  # rebuild with the fresh credentials
         return RedirectResponse("/setup?msg=Google+Drive+authorized", status_code=303)
@@ -2148,7 +2179,12 @@ def create_app(
         ).fetchall()
 
     @app.get("/trash/confirm", response_class=HTMLResponse)
-    def trash_confirm(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    def trash_confirm(
+        request: Request,
+        msg: str | None = None,
+        err: str | None = None,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
         items = _pending_trash(conn)
         return templates.TemplateResponse(
             request,
@@ -2159,6 +2195,9 @@ def create_app(
                 "total": sum((r["size"] or 0) for r in items),
                 "can_trash": can_trash(),
                 "auth": auth_mode(),
+                "owner_connected": trash_owner_connected(),
+                "msg": msg,
+                "error": err,
             },
         )
 
@@ -2215,6 +2254,7 @@ def create_app(
                 "failures": failures,
                 "auth": auth_mode(),
                 "owner_blocked": owner_blocked,
+                "owner_connected": trash_owner_connected(),
             },
         )
 
