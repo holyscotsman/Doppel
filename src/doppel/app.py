@@ -103,6 +103,9 @@ PAGE_SIZE = 20
 
 # groups loaded per infinite-scroll batch on the one-page review
 REVIEW_BATCH = 8
+# groups per page in "batch" display mode (paged, not infinite scroll)
+BATCH_PAGE = 200
+REVIEW_MODES = ("scroll", "all", "batch")
 
 REVIEWED_FILTERS = {
     "all": "",
@@ -806,7 +809,7 @@ def create_app(
     ):
         form = await request.form()
         mode = str(form.get("review_mode", "scroll"))
-        set_meta(conn, "review_mode", "all" if mode == "all" else "scroll")
+        set_meta(conn, "review_mode", mode if mode in REVIEW_MODES else "scroll")
         return RedirectResponse("/settings?saved=1", status_code=303)
 
     @app.get("/setup", response_class=HTMLResponse)
@@ -1155,19 +1158,24 @@ def create_app(
         reviewed: str,
         sort: str,
         variants: bool,
+        page: int = 1,
     ) -> dict:
         """Context for the right review pane: the group cards for the current
-        tier/filter/sort plus the controls' current state."""
+        tier/filter/sort plus the controls' current state. Three display modes
+        (review_mode meta): 'all' (every group at once), 'scroll' (infinite-load
+        REVIEW_BATCH at a time), and 'batch' (paged, BATCH_PAGE per page)."""
         sort = resolve_sort(tier, sort)
-        all_at_once = get_meta(conn, "review_mode", "scroll") == "all"
+        mode = get_meta(conn, "review_mode", "scroll")
+        if mode not in REVIEW_MODES:
+            mode = "scroll"
+        if mode == "all":
+            limit, page = None, 1
+        elif mode == "batch":
+            limit, page = BATCH_PAGE, max(1, page)
+        else:
+            limit, page = REVIEW_BATCH, 1
         ids, total, stats = _review_page_ids(
-            conn,
-            tier,
-            reviewed,
-            sort,
-            variants,
-            page=1,
-            limit=None if all_at_once else REVIEW_BATCH,
+            conn, tier, reviewed, sort, variants, page=page, limit=limit
         )
         groups = [_group_context(conn, gid) for gid in ids]
         reclaim_total = conn.execute(
@@ -1177,6 +1185,7 @@ def create_app(
             WHERE d.action = 'trash' AND p.status = 'active'
             """
         ).fetchone()["n"]
+        total_pages = max(1, -(-total // BATCH_PAGE)) if mode == "batch" else 1
         return {
             "tier": tier,
             "reviewed": reviewed,
@@ -1184,7 +1193,10 @@ def create_app(
             "variants": variants,
             "sort_options": sort_options(tier),
             "groups": groups,
-            "has_more": (not all_at_once) and total > REVIEW_BATCH,
+            "mode": mode,
+            "page": page,
+            "total_pages": total_pages,
+            "has_more": mode == "scroll" and total > REVIEW_BATCH,
             "next_page": 2,
             "total": total,
             "stats": stats,
@@ -1239,9 +1251,12 @@ def create_app(
         reviewed: str = "all",
         sort: str | None = None,
         variants: str = "",
+        page: int = 1,
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        ctx = _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+        ctx = _review_pane_ctx(
+            conn, tier, reviewed, sort or "", _truthy(variants), page=page
+        )
         resp = templates.TemplateResponse(request, "_review_pane.html", ctx)
         # keep the address bar in sync so refresh/bookmark/share preserve the
         # tier + filter + sort the user is actually looking at
@@ -1773,11 +1788,14 @@ def create_app(
         reviewed: str,
         sort: str | None,
         variants: str,
+        page: int = 1,
     ):
         """Re-render the review pane after a bulk action (htmx swap), or fall
         back to a full navigation for a plain POST."""
         if request.headers.get("HX-Request"):
-            ctx = _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+            ctx = _review_pane_ctx(
+                conn, tier, reviewed, sort or "", _truthy(variants), page=page
+            )
             resp = templates.TemplateResponse(request, "_review_pane.html", ctx)
             resp.headers["HX-Push-Url"] = _pane_push_url(
                 tier, ctx["reviewed"], ctx["sort"], ctx["variants"]
@@ -1851,6 +1869,50 @@ def create_app(
         )
         conn.commit()
         return _pane_response(request, conn, tier, reviewed, sort, variants)
+
+    @app.post("/review/mode", response_class=HTMLResponse)
+    def set_review_mode(
+        request: Request,
+        mode: str = "scroll",
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Switch the review display mode (all / scroll / batch) and re-render
+        the pane in that mode."""
+        set_meta(conn, "review_mode", mode if mode in REVIEW_MODES else "scroll")
+        return _pane_response(request, conn, tier, reviewed, sort, variants)
+
+    @app.post("/review/reviewed-batch")
+    def review_batch(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        page: int = 1,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Mark reviewed only the groups on the current batch page (the 200 in
+        view), leaving the other pages untouched."""
+        page = max(1, page)
+        ids, _, _ = _review_page_ids(
+            conn,
+            tier,
+            reviewed,
+            resolve_sort(tier, sort or ""),
+            _truthy(variants),
+            page=page,
+            limit=BATCH_PAGE,
+        )
+        for gid in ids:
+            ctx = _group_context(conn, gid)
+            if ctx is not None:
+                _finalize_group(conn, ctx)
+        conn.commit()
+        return _pane_response(request, conn, tier, reviewed, sort, variants, page=page)
 
     def _pending_trash(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """Photos marked trash whose groups are fully reviewed and that are still

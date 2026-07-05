@@ -1,4 +1,5 @@
 {% set titles = {"exact": "Exact duplicates", "near": "Near-duplicates", "similar": "Similar photos", "vlm": "AI-checked"} %}
+{% set qs = "tier=" ~ tier ~ "&reviewed=" ~ reviewed ~ "&sort=" ~ sort ~ "&variants=" ~ ('1' if variants else '') %}
 <div class="review-head">
   <h2>{{ titles.get(tier, tier) }}</h2>
   <span class="muted rh-stats">{{ stats.reviewed_groups or 0 }} of {{ stats.total_groups or 0 }} groups reviewed{% if reclaim_total %} · <span class="reclaim">frees up {{ reclaim_total | filesizeformat }}</span>{% endif %}</span>
@@ -29,8 +30,16 @@
   {% endif %}
 </form>
 
+<div class="review-modes">
+  <span class="muted">View</span>
+  {% for m, lbl in [("all", "All at once"), ("scroll", "Continuous scroll"), ("batch", "Batch of 200")] %}
+  <button type="button" class="mini-btn{% if mode == m %} on{% endif %}"
+          hx-post="/review/mode?mode={{ m }}&{{ qs }}"
+          hx-target="#review-pane" hx-swap="innerHTML">{{ lbl }}</button>
+  {% endfor %}
+</div>
+
 <div class="review-actions">
-  {% set qs = "tier=" ~ tier ~ "&reviewed=" ~ reviewed ~ "&sort=" ~ sort ~ "&variants=" ~ ('1' if variants else '') %}
   <button type="button" class="mini-btn"
           hx-post="/review/reviewed-all?{{ qs }}"
           hx-target="#review-pane" hx-swap="innerHTML"
@@ -53,3 +62,33 @@
 <div id="review-stream">
   {% include "_review_batch.html" %}
 </div>
+
+{% if mode == 'batch' and groups %}
+<div class="batch-bar">
+  {% if total_pages > 1 %}
+  <div class="batch-nav">
+    <button type="button" class="mini-btn"{% if page <= 1 %} disabled{% endif %}
+            hx-get="/review/pane?{{ qs }}&page={{ page - 1 }}"
+            hx-target="#review-pane" hx-swap="innerHTML">‹ Prev</button>
+    <span class="muted">Page {{ page }} of {{ total_pages }}</span>
+    <button type="button" class="mini-btn"{% if page >= total_pages %} disabled{% endif %}
+            hx-get="/review/pane?{{ qs }}&page={{ page + 1 }}"
+            hx-target="#review-pane" hx-swap="innerHTML">Next ›</button>
+  </div>
+  {% endif %}
+  <div class="review-actions">
+    <button type="button" class="mini-btn"
+            hx-post="/review/reviewed-batch?{{ qs }}&page={{ page }}"
+            hx-target="#review-pane" hx-swap="innerHTML"
+            title="Mark just the {{ groups | length }} groups on this page reviewed">
+      Review this batch ({{ groups | length }})
+    </button>
+    <button type="button" class="mini-btn"
+            hx-post="/review/reviewed-all?{{ qs }}"
+            hx-target="#review-pane" hx-swap="innerHTML"
+            title="Mark every group in every batch reviewed">
+      Select all batches
+    </button>
+  </div>
+</div>
+{% endif %}

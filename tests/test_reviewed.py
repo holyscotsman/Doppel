@@ -110,3 +110,37 @@ def test_move_to_trash_excludes_unreviewed_groups(client, config, group) -> None
     client.post(f"/groups/{gid}/reviewed?value=1")
     page = client.get("/trash/confirm")
     assert "small.jpg" in page.text
+
+
+# ---- #5 display modes ---------------------------------------------------
+
+
+def test_scroll_is_the_default_mode(client, config, group) -> None:
+    pane = client.get("/review/pane?tier=exact")
+    assert "Continuous scroll" in pane.text  # the mode selector is present
+    assert "Review this batch" not in pane.text  # batch controls are hidden
+
+
+def test_batch_mode_shows_paging_and_batch_select(client, config, group) -> None:
+    resp = client.post(
+        "/review/mode?mode=batch&tier=exact", headers={"HX-Request": "1"}
+    )
+    assert resp.status_code == 200
+    assert "Review this batch" in resp.text
+    assert "Select all batches" in resp.text
+
+
+def test_review_this_batch_marks_the_page(client, config, group) -> None:
+    gid, big, small = group
+    client.post("/review/mode?mode=batch&tier=exact", headers={"HX-Request": "1"})
+    resp = client.post(
+        "/review/reviewed-batch?tier=exact&page=1", headers={"HX-Request": "1"}
+    )
+    assert resp.status_code == 200
+    assert _decisions(config) == {big: "keep", small: "trash"}
+
+
+def test_all_at_once_mode_has_no_batch_controls(client, config, group) -> None:
+    client.post("/review/mode?mode=all&tier=exact", headers={"HX-Request": "1"})
+    pane = client.get("/review/pane?tier=exact")
+    assert "Review this batch" not in pane.text
