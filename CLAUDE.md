@@ -23,12 +23,18 @@ Core: `make setup`, `make run`, `make test`, `make lint`, `make scan`.
 
 ## Rules
 
-- The entire scanning pipeline (sync, thumbnails, all detection) runs on
-  `drive.readonly` and never modifies Drive. The ONLY write path is the
-  explicit, user-confirmed **move-to-trash** action, which uses a separate
-  write-scoped credential (`DRIVE_WRITE_SCOPES`) to set `trashed=true`. It is
-  reversible (recoverable in Drive Trash for 30 days) and must never permanently
-  delete or empty the Trash. Do not broaden write use beyond this.
+- The scanning pipeline (sync, thumbnails, all detection) runs on
+  `drive.readonly` and never modifies Drive. Writes are confined to TWO
+  owner-scoped, reversible, never-permanent-delete paths, both using the
+  write-scoped OWNER credential (`DRIVE_WRITE_SCOPES` via a user OAuth sign-in;
+  a service account is not the owner and cannot write the user's files):
+  1. **Move-to-trash** — the explicit, user-confirmed action that sets
+     `trashed=true` (recoverable in Drive Trash for 30 days).
+  2. **WebP → PNG conversion** — an opt-in (`[webp] convert_after_scan`, off by
+     default) post-scan pass that writes a lossless PNG beside each WebP and
+     MOVES the original into a trash folder (never deletes). Idempotent via the
+     `webp_conversions` table.
+  Never permanently delete, empty the Trash, or broaden write use beyond these.
 - All image bytes go through the `ImageFetcher` abstraction (SPEC.md):
   size-parameterized thumbnails (default 512px) cached to `cache/`.
   Original-size fetch is used by Phase 7 brand tagging only — never for

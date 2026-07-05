@@ -32,6 +32,16 @@ class PerfConfig:
 
 
 @dataclass(frozen=True)
+class WebpConfig:
+    # After a scan, losslessly convert every WebP to PNG in the same folder and
+    # move the original into trash_folder. OFF by default: it is the app's only
+    # unattended Drive write, so it must be opted into. Needs the owner sign-in
+    # (a service account can't create/move the user's files). Reversible.
+    convert_after_scan: bool = False
+    trash_folder: str = "WEBP_Trash"
+
+
+@dataclass(frozen=True)
 class Config:
     thumb_size: int
     near_hamming_max: int
@@ -54,6 +64,7 @@ class Config:
     # the largest file is kept. Turn off to always just keep the largest.
     prefer_trash_sort: bool = True
     sort_folder_keyword: str = "sort"
+    webp: WebpConfig = field(default_factory=WebpConfig)
 
 
 def load_config(path: Path | str = "config.toml") -> Config:
@@ -99,6 +110,10 @@ def load_config(path: Path | str = "config.toml") -> Config:
         resume_overlap=raw.get("resume_overlap", 3),
         prefer_trash_sort=raw.get("prefer_trash_sort", True),
         sort_folder_keyword=raw.get("sort_folder_keyword", "sort"),
+        webp=WebpConfig(
+            convert_after_scan=raw.get("webp", {}).get("convert_after_scan", False),
+            trash_folder=raw.get("webp", {}).get("trash_folder", "WEBP_Trash"),
+        ),
     )
 
 

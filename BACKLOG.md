@@ -84,3 +84,23 @@ phase's acceptance criteria.
   a doomed `files.update` per non-owned file and classifying the 403, fetch
   `capabilities/canTrash,ownedByMe` up front (store during sync or a cheap
   `files.get`) so the confirm page can warn precisely and skip doomed calls.
+
+## WebP → PNG conversion (follow-ups)
+
+- **Partial-failure leaves the WebP un-relocated.** If `upload_file` succeeds
+  but `move_file` then fails (transient), the pass records nothing and retries
+  next scan — but the retry sees the now-existing target PNG and skips with "a
+  PNG of that name exists", so the original WebP never moves to the trash folder
+  (it just sits beside the new PNG). Safe (no data loss, no duplicate PNG), but
+  the original isn't tidied. Fix: when the existing target PNG's id matches a
+  `webp_conversions.png_drive_id` we created, complete the move instead of
+  skipping; otherwise keep skipping (never assume an unrelated PNG is ours).
+
+- **No UI control or results view.** Conversion is config-only (`[webp]
+  convert_after_scan`) and reports via logs + the `webp_conversions` table. A
+  settings toggle, a manual "Convert WebPs now" button, and a small results
+  summary (converted / skipped / space reclaimed) would make it discoverable.
+
+- **Serial conversion.** Downloads + uploads run one-at-a-time in the post-scan
+  thread. Fine for modest WebP counts; parallelize via `parallel_map` if a
+  library has thousands of WebPs.

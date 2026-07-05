@@ -60,6 +60,7 @@ from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
 from doppel.vlm import OllamaClient, VlmClient
+from doppel.webpconv import convert_library_webp
 
 log = logging.getLogger("doppel")
 
@@ -858,6 +859,28 @@ def create_app(
             return lambda: run_adjudicate(conn, fetcher, vlm, cfg)
         raise ValueError(f"unknown stage {stage!r}")
 
+    def _maybe_convert_webp(conn: sqlite3.Connection) -> None:
+        """After a full scan, when enabled, losslessly convert WebPs to PNG and
+        set the originals aside in the trash folder. Requires the owner sign-in —
+        a service account isn't the owner of the user's files and can't create or
+        move them — so without it this logs and no-ops rather than 403-ing."""
+        if not config.webp.convert_after_scan:
+            return
+        if not trash_owner_connected():
+            log.info(
+                "webp: convert_after_scan is on but no owner sign-in is connected "
+                "— skipping (connect your Google account to enable WebP->PNG)"
+            )
+            return
+        try:
+            client = trash_client_factory()
+            summary = convert_library_webp(
+                conn, client, trash_folder=config.webp.trash_folder
+            )
+            log.info("webp: post-scan conversion %s", summary)
+        except Exception:
+            log.exception("webp: post-scan conversion pass failed")
+
     def run_stage_job(stage: str) -> None:
         """Run one stage, or the whole detection pipeline for stage == 'all'.
         The interactive OAuth flow is never run here: it would block the worker
@@ -897,6 +920,10 @@ def create_app(
                     # later stages depend on this one's output
                     log.exception("stage %s failed", st)
                     return
+            # the full pipeline finished cleanly: run the opt-in post-scan
+            # WebP -> PNG conversion (a Drive write, owner sign-in required)
+            if stage == "all":
+                _maybe_convert_webp(conn)
         finally:
             conn.close()
 

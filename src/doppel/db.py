@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS vlm_results (
   confidence     REAL,
   created_at     TEXT NOT NULL
 );
+
+-- record of WebP -> lossless PNG conversions, so the post-scan pass is
+-- idempotent (never re-converts) and auditable. The original WebP is moved
+-- to a trash folder (reversible), never deleted.
+CREATE TABLE IF NOT EXISTS webp_conversions (
+  source_drive_id TEXT PRIMARY KEY,   -- the original .webp file id
+  png_drive_id    TEXT,               -- created PNG id (null when skipped)
+  status          TEXT NOT NULL,      -- converted | skipped
+  reason          TEXT,               -- why skipped (animated, unreadable, ...)
+  converted_at    TEXT NOT NULL
+);
 """
 
 

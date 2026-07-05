@@ -459,6 +459,102 @@ class GoogleDriveClient:
             _, done = downloader.next_chunk()
         return buf.getvalue()
 
+    # --- write ops (WebP->PNG conversion) -------------------------------------
+    # These CREATE and MOVE files, so they need a write-scoped OWNER credential
+    # (a service account is not the owner and would 403). They never delete.
+
+    def root_folder_id(self) -> str:
+        """The id of this account's My Drive root, for re-parenting files that
+        live at the top level."""
+        return (
+            self._service.files()
+            .get(fileId="root", fields="id", supportsAllDrives=True)
+            .execute()["id"]
+        )
+
+    def ensure_child_folder(self, name: str, parent_id: str | None) -> str:
+        """Find, or create, a subfolder `name` directly under parent_id (or the
+        root when parent_id is None); return its id. Idempotent."""
+        safe = name.replace("\\", "\\\\").replace("'", "\\'")
+        query = f"name = '{safe}' and mimeType = '{FOLDER_MIME}' and trashed = false"
+        if parent_id:
+            query += f" and '{self._sanitize_id(parent_id)}' in parents"
+        page = (
+            self._service.files()
+            .list(
+                q=query,
+                fields="files(id, name)",
+                pageSize=1,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        hits = page.get("files", [])
+        if hits:
+            return hits[0]["id"]
+        body: dict[str, Any] = {"name": name, "mimeType": FOLDER_MIME}
+        if parent_id:
+            body["parents"] = [self._sanitize_id(parent_id)]
+        created = (
+            self._service.files()
+            .create(body=body, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        return created["id"]
+
+    def find_child(self, name: str, parent_id: str | None) -> str | None:
+        """The id of a non-trashed file named `name` under parent_id, if one
+        exists — so the converter can avoid creating a duplicate PNG."""
+        safe = name.replace("\\", "\\\\").replace("'", "\\'")
+        query = f"name = '{safe}' and trashed = false"
+        if parent_id:
+            query += f" and '{self._sanitize_id(parent_id)}' in parents"
+        page = (
+            self._service.files()
+            .list(
+                q=query,
+                fields="files(id)",
+                pageSize=1,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        hits = page.get("files", [])
+        return hits[0]["id"] if hits else None
+
+    def upload_file(
+        self, name: str, parent_id: str | None, data: bytes, mime_type: str
+    ) -> str:
+        """Create a new file with `data` under parent_id (or root); return its id."""
+        import io
+
+        from googleapiclient.http import MediaIoBaseUpload
+
+        body: dict[str, Any] = {"name": name}
+        if parent_id:
+            body["parents"] = [self._sanitize_id(parent_id)]
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=True)
+        created = (
+            self._service.files()
+            .create(body=body, media_body=media, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        return created["id"]
+
+    def move_file(self, drive_id: str, add_parent: str, remove_parent: str) -> None:
+        """Re-parent a file (add add_parent, remove remove_parent) — used to set a
+        converted WebP original aside in the trash folder. Reversible; NEVER
+        deletes."""
+        self._service.files().update(
+            fileId=self._sanitize_id(drive_id),
+            addParents=self._sanitize_id(add_parent),
+            removeParents=self._sanitize_id(remove_parent),
+            fields="id, parents",
+            supportsAllDrives=True,
+        ).execute()
+
 
 class ImageFetcher(Protocol):
     """The single choke point for image bytes (SPEC.md). Nothing else in the

@@ -33,3 +33,12 @@ clip_batch = 64            # images per GPU pass when embedding; 64 suits 24GB+
 # db_batch = 100           # rows per sqlite transaction from the single writer
 # adjudicate_workers = 3   # fetch + VLM threads (Ollama is one local server)
 # queue_maxsize = 64       # bounded worker->writer handoff depth
+
+# After a scan, losslessly convert every WebP to PNG (same folder) and move the
+# original into trash_folder. OFF by default — this is the app's only unattended
+# Drive WRITE, so you opt into it here. It needs the owner sign-in on the Move-to
+# -Trash page (a service account can't create/move your files). Originals only
+# move (recoverable), never deleted; already-converted files are skipped.
+[webp]
+convert_after_scan = false
+trash_folder = "WEBP_Trash"
