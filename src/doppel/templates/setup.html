@@ -127,6 +127,12 @@
     {% endif %}
   {% endif %}
   {% if models %}
+  {% if auto_selected %}
+  <p class="ok">✓ Auto-selected the best installed model: <strong>{{ recommended }}</strong>.
+    Change it below if you like.</p>
+  {% elif recommended %}
+  <p class="muted">Recommended for fine detail: <strong>{{ recommended }}</strong>.</p>
+  {% endif %}
   <form method="post" action="/setup/ollama" class="decision">
     <input type="hidden" name="host" value="{{ host }}">
     <select name="model">
@@ -158,13 +164,16 @@
        hx-trigger="load">
     <p class="muted">loading your Drive…</p>
   </div>
-  <p style="margin-top:1rem">
-    <a href="/" class="wz-link">✓ Scope set — go scan &amp; watch progress &rarr;</a>
-  </p>
+  <form method="post" action="/setup/complete" style="margin-top:1rem">
+    <button type="submit" class="wz-link" style="border:none; cursor:pointer">
+      ✓ All set — go to the dashboard &rarr;</button>
+  </form>
   {% else %}
   <p class="muted">Connect Google Drive first (step 1) to browse your folders.</p>
   {% endif %}
 </div>
 
-<p><a href="/">&larr; back to dashboard</a></p>
+<form method="post" action="/setup/complete" style="margin-top:1rem">
+  <button type="submit" class="ghost-btn">finish &amp; go to the dashboard</button>
+</form>
 {% endblock %}

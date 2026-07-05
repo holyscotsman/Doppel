@@ -534,6 +534,33 @@ def _list_ollama_models(host: str) -> list[str]:
         return _usable_models(client)
 
 
+# preference for auto-picking a vision model when several are installed (higher =
+# better). The usable list is already filtered to multi-image vision models; this
+# ranks the survivors by how well they read fine detail (logos, small text).
+_MODEL_PREFERENCE = (
+    "qwen3-vl",
+    "qwen2.5-vl",
+    "qwen2-vl",
+    "qwen",
+    "gemma3",
+    "gemma",
+    "llava",
+)
+
+
+def _rank_vision_model(name: str) -> int:
+    base = name.split(":", 1)[0].lower()
+    for i, key in enumerate(_MODEL_PREFERENCE):
+        if key in base:
+            return len(_MODEL_PREFERENCE) - i
+    return 0
+
+
+def _best_vision_model(models: list[str]) -> str | None:
+    """The best-ranked usable vision model, or None for an empty list."""
+    return max(models, key=_rank_vision_model, default=None)
+
+
 def create_app(
     config: Config | None = None,
     fetcher_factory: Callable[[Config], ImageFetcher] | None = None,
@@ -545,9 +572,14 @@ def create_app(
     drive_client_factory: Callable[[], GoogleDriveClient] | None = None,
     trash_client_factory: Callable[[], GoogleDriveClient] | None = None,
     enable_scheduler: bool = False,
+    enforce_setup: bool = False,
+    setup_marker: Path | str = "settings.ini",
 ) -> FastAPI:
     """Build the app. Tests inject a Config and fake factories. The daily-scan
-    scheduler thread only starts when enable_scheduler is set (real runs)."""
+    scheduler thread only starts when enable_scheduler is set (real runs). When
+    enforce_setup is set, the home page redirects to /setup until setup_marker
+    exists — deleting that file re-triggers the setup wizard."""
+    setup_marker = Path(setup_marker)
     config = config or load_config(config_path)
     fetcher_factory = fetcher_factory or _build_real_fetcher
     embedder_factory = embedder_factory or (lambda cfg: ClipEmbedder(cfg.clip_model))
@@ -901,6 +933,15 @@ def create_app(
                     "message": f"Test failed — could not reach Ollama at {host}.",
                     "detail": str(exc),
                 }
+        # #13 auto-pick: when the test lists models, recommend the best one, and
+        # auto-select it when nothing valid is configured yet (a configured,
+        # still-installed model is left alone).
+        recommended = _best_vision_model(models) if models else None
+        auto_selected = False
+        if recommended and config.ollama.model not in (models or []):
+            set_config_value(config_path, "model", recommended, section="ollama")
+            reload_config()
+            auto_selected = True
         mode = auth_mode()
         return templates.TemplateResponse(
             request,
@@ -918,6 +959,8 @@ def create_app(
                 "host": host,
                 "saved_host": config.ollama.host,
                 "saved_model": config.ollama.model,
+                "recommended": recommended,
+                "auto_selected": auto_selected,
                 "models": models,
                 "ollama_status": ollama_status,
                 "tested": tested,
@@ -1119,6 +1162,14 @@ def create_app(
             status_code=303,
         )
 
+    @app.post("/setup/complete")
+    def finish_setup():
+        """Finish setup: write the marker so the home page stops redirecting to
+        the wizard (make run opens the dashboard from now on). Deleting the
+        marker file re-triggers setup."""
+        setup_marker.write_text("[setup]\ncomplete = true\n", encoding="utf-8")
+        return RedirectResponse("/", status_code=303)
+
     @app.post("/setup/folder")
     async def save_folder(request: Request):
         from urllib.parse import quote
@@ -1284,6 +1335,10 @@ def create_app(
         variants: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
+        # once setup is done a marker file is written; make run then opens the
+        # dashboard directly. Delete the marker to walk the wizard again.
+        if enforce_setup and not setup_marker.exists():
+            return RedirectResponse("/setup", status_code=303)
         return _render_workspace(request, conn, tier, reviewed, sort, variants)
 
     @app.get("/review", response_class=HTMLResponse)
@@ -2129,4 +2184,4 @@ def build() -> FastAPI:
     from doppel.logsetup import setup_diagnostics
 
     setup_diagnostics(app_name="doppel")
-    return create_app(enable_scheduler=True)
+    return create_app(enable_scheduler=True, enforce_setup=True)

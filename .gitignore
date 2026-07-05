@@ -3,6 +3,9 @@ credentials.json
 token.json
 service_account.json
 
+# setup-complete marker (delete to re-run the setup wizard)
+settings.ini
+
 # local data
 cache/
 logs/

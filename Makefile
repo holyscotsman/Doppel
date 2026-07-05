@@ -8,8 +8,8 @@ help: ## List available targets
 setup: ## Install Python and project dependencies into .venv
 	uv sync
 
-run: ## Serve the web UI and open the setup page in your browser
-	@( sleep 7 && python3 -m webbrowser "http://127.0.0.1:8000/setup" >/dev/null 2>&1 & ) || true
+run: ## Serve the web UI and open it in your browser
+	@( sleep 7 && python3 -m webbrowser "http://127.0.0.1:8000/" >/dev/null 2>&1 & ) || true
 	uv run uvicorn --factory doppel.app:build --host 127.0.0.1 --port 8000
 
 test: ## Run the test suite
