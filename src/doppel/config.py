@@ -48,6 +48,12 @@ class Config:
     # recently finished photos — cheap insurance against a half-written result
     # or a truncated fetch right at the point of the crash.
     resume_overlap: int = 3
+    # review preselect: within a duplicate group, prefer trashing the copy whose
+    # folder path contains sort_folder_keyword (e.g. a "To Sort" inbox), keeping
+    # the copy filed in a real folder. On a tie (all or none in such a folder)
+    # the largest file is kept. Turn off to always just keep the largest.
+    prefer_trash_sort: bool = True
+    sort_folder_keyword: str = "sort"
 
 
 def load_config(path: Path | str = "config.toml") -> Config:
@@ -91,6 +97,8 @@ def load_config(path: Path | str = "config.toml") -> Config:
             queue_maxsize=perf.get("queue_maxsize", max(4 * cpu, 2 * io_workers)),
         ),
         resume_overlap=raw.get("resume_overlap", 3),
+        prefer_trash_sort=raw.get("prefer_trash_sort", True),
+        sort_folder_keyword=raw.get("sort_folder_keyword", "sort"),
     )
 
 

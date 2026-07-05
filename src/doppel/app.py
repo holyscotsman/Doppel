@@ -192,6 +192,26 @@ class _RateEstimator:
 HASH_BITS = 64  # pHash/dHash are 8x8 = 64-bit
 
 
+def default_selection(members: list, prefer_sort: bool, keyword: str) -> dict[int, str]:
+    """The pre-checked keep/trash choice for a group's members (passed
+    largest-first). Keep exactly one photo, trash the rest. When prefer_sort is
+    on, the kept photo is the largest one NOT in a folder whose path contains
+    `keyword` (case-insensitive) — so a copy sitting in a "To Sort" inbox is
+    trashed in favour of the copy filed in a real folder. If every copy (or no
+    copy) is in such a folder, fall back to keeping the largest. Saved decisions
+    always override this default."""
+    if not members:
+        return {}
+    kw = keyword.lower().strip()
+
+    def in_sort(m: object) -> bool:
+        return bool(prefer_sort and kw and kw in (m["folder_path"] or "").lower())
+
+    non_sort = [m for m in members if not in_sort(m)]
+    keeper = (non_sort or members)[0]["id"]  # members are largest-first
+    return {m["id"]: ("keep" if m["id"] == keeper else "trash") for m in members}
+
+
 def group_confidence(tier: str, scores: list) -> float | None:
     """A 0-1 confidence that a group's members really are duplicates.
 
@@ -1296,10 +1316,10 @@ def create_app(
                 (group_id,),
             )
         }
-        selected = {
-            p["id"]: decisions.get(p["id"], "keep" if i == 0 else "trash")
-            for i, p in enumerate(members)
-        }
+        default = default_selection(
+            members, config.prefer_trash_sort, config.sort_folder_keyword
+        )
+        selected = {p["id"]: decisions.get(p["id"], default[p["id"]]) for p in members}
         reviewed = len(decisions) == len(members) and len(members) > 0
         reclaim = sum((p["size"] or 0) for p in members if selected[p["id"]] == "trash")
         verdicts = []
@@ -1540,12 +1560,12 @@ def create_app(
                 (group_id,),
             )
         }
-        # default preselect: keep the largest file (first row), trash the rest;
-        # the user's saved decisions override
-        selected = {
-            p["id"]: decisions.get(p["id"], "keep" if i == 0 else "trash")
-            for i, p in enumerate(members)
-        }
+        # default preselect: keep one copy (a real folder over a "sort" inbox,
+        # else the largest), trash the rest; the user's saved decisions override
+        default = default_selection(
+            members, config.prefer_trash_sort, config.sort_folder_keyword
+        )
+        selected = {p["id"]: decisions.get(p["id"], default[p["id"]]) for p in members}
         verdicts = []
         if group["tier"] == "vlm" and members:
             import json as _json
@@ -1702,12 +1722,16 @@ def create_app(
         for gid in group_ids:
             members = conn.execute(
                 """
-                SELECT p.id FROM group_members m JOIN photos p ON p.id = m.photo_id
+                SELECT p.id, p.size, p.folder_path
+                FROM group_members m JOIN photos p ON p.id = m.photo_id
                 WHERE m.group_id = ? ORDER BY p.size DESC
                 """,
                 (gid,),
             ).fetchall()
-            for i, row in enumerate(members):
+            default = default_selection(
+                members, config.prefer_trash_sort, config.sort_folder_keyword
+            )
+            for row in members:
                 conn.execute(
                     """
                     INSERT INTO decisions (photo_id, action, decided_at)
@@ -1715,7 +1739,7 @@ def create_app(
                     ON CONFLICT(photo_id) DO UPDATE SET
                       action = excluded.action, decided_at = excluded.decided_at
                     """,
-                    (row["id"], "keep" if i == 0 else "trash", now()),
+                    (row["id"], default[row["id"]], now()),
                 )
         conn.commit()
         # htmx (the workspace) swaps the refreshed review pane in place; a plain
