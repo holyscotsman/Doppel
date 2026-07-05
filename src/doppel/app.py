@@ -1755,14 +1755,120 @@ def create_app(
             url=f"/review?tier={tier}&reviewed={reviewed}", status_code=303
         )
 
+    def _finalize_group(conn: sqlite3.Connection, ctx: dict) -> None:
+        """Commit a group's shown keep/trash selection as decisions, so every
+        member is decided and the group reads as reviewed. Idempotent."""
+        for p in ctx["members"]:
+            conn.execute(
+                "INSERT INTO decisions (photo_id, action, decided_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(photo_id) DO UPDATE SET "
+                "action = excluded.action, decided_at = excluded.decided_at",
+                (p["id"], ctx["selected"][p["id"]], now()),
+            )
+
+    def _pane_response(
+        request: Request,
+        conn: sqlite3.Connection,
+        tier: str,
+        reviewed: str,
+        sort: str | None,
+        variants: str,
+    ):
+        """Re-render the review pane after a bulk action (htmx swap), or fall
+        back to a full navigation for a plain POST."""
+        if request.headers.get("HX-Request"):
+            ctx = _review_pane_ctx(conn, tier, reviewed, sort or "", _truthy(variants))
+            resp = templates.TemplateResponse(request, "_review_pane.html", ctx)
+            resp.headers["HX-Push-Url"] = _pane_push_url(
+                tier, ctx["reviewed"], ctx["sort"], ctx["variants"]
+            )
+            return resp
+        return RedirectResponse(
+            url=f"/review?tier={tier}&reviewed={reviewed}", status_code=303
+        )
+
+    @app.post("/groups/{group_id}/reviewed", response_class=HTMLResponse)
+    def set_group_reviewed(
+        request: Request,
+        group_id: int,
+        value: str = "1",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Toggle a group's Reviewed state. 'Reviewed' rides on the decisions
+        table because group ids are rebuilt on every scan: checking commits the
+        group's shown keep/trash selection (every member decided); unchecking
+        clears those decisions."""
+        ctx = _group_context(conn, group_id)
+        if ctx is None:
+            return _group_card_response(request, conn, group_id)
+        if value == "1":
+            _finalize_group(conn, ctx)
+        else:
+            ids = [p["id"] for p in ctx["members"]]
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                conn.execute(
+                    f"DELETE FROM decisions WHERE photo_id IN ({placeholders})",  # noqa: S608
+                    ids,
+                )
+        conn.commit()
+        return _group_card_response(request, conn, group_id)
+
+    @app.post("/review/reviewed-all")
+    def review_all(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Mark every group in the tier reviewed: commit each group's shown
+        selection, filling undecided members with the default keep/trash choice
+        without overwriting a manual one."""
+        for row in conn.execute("SELECT id FROM groups WHERE tier = ?", (tier,)):
+            ctx = _group_context(conn, row["id"])
+            if ctx is not None:
+                _finalize_group(conn, ctx)
+        conn.commit()
+        return _pane_response(request, conn, tier, reviewed, sort, variants)
+
+    @app.post("/review/unreviewed-all")
+    def unreview_all(
+        request: Request,
+        tier: str = "exact",
+        reviewed: str = "all",
+        sort: str | None = None,
+        variants: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Clear every decision in the tier, so no group reads as reviewed."""
+        conn.execute(
+            "DELETE FROM decisions WHERE photo_id IN ("
+            "  SELECT m.photo_id FROM group_members m "
+            "  JOIN groups g ON g.id = m.group_id WHERE g.tier = ?)",
+            (tier,),
+        )
+        conn.commit()
+        return _pane_response(request, conn, tier, reviewed, sort, variants)
+
     def _pending_trash(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-        """Photos marked trash that are still live in Drive (largest first, so
-        the confirm list leads with the biggest space wins)."""
+        """Photos marked trash whose groups are fully reviewed and that are still
+        live in Drive (largest first, so the confirm list leads with the biggest
+        space wins). A photo is excluded while ANY group it belongs to still has
+        an undecided member — Move-to-Trash only acts on reviewed groups. Photos
+        in no group (e.g. a direct decision) are always eligible."""
         return conn.execute(
             """
             SELECT p.id, p.drive_id, p.name, p.size, p.folder_path
             FROM decisions d JOIN photos p ON p.id = d.photo_id
             WHERE d.action = 'trash' AND p.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM group_members m
+                JOIN group_members m2 ON m2.group_id = m.group_id
+                LEFT JOIN decisions d2 ON d2.photo_id = m2.photo_id
+                WHERE m.photo_id = p.id AND d2.photo_id IS NULL
+              )
             ORDER BY p.size DESC, p.name
             """
         ).fetchall()

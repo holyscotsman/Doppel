@@ -30,13 +30,20 @@
 </form>
 
 <div class="review-actions">
+  {% set qs = "tier=" ~ tier ~ "&reviewed=" ~ reviewed ~ "&sort=" ~ sort ~ "&variants=" ~ ('1' if variants else '') %}
   <button type="button" class="mini-btn"
-          hx-post="/review/auto?tier={{ tier }}&reviewed={{ reviewed }}&sort={{ sort }}&variants={{ '1' if variants else '' }}"
+          hx-post="/review/reviewed-all?{{ qs }}"
           hx-target="#review-pane" hx-swap="innerHTML"
-          title="Keep the largest photo in every group you haven't touched yet">
-    auto-keep largest
+          title="Mark every group reviewed, keeping the preselected copy in each">
+    Review all
   </button>
-  <a href="/export" class="mini-btn">export trash list</a>
+  <button type="button" class="mini-btn"
+          hx-post="/review/unreviewed-all?{{ qs }}"
+          hx-target="#review-pane" hx-swap="innerHTML"
+          title="Clear every keep/trash decision in this tier">
+    Mark all unreviewed
+  </button>
+  <a href="/trash/confirm" class="mini-btn danger">🗑 Move to Trash</a>
 </div>
 
 {% if not groups %}

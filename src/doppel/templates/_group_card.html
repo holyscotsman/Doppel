@@ -1,11 +1,16 @@
 <div class="review-group{% if g.reviewed %} reviewed{% endif %}" id="group-{{ g.group.id }}">
   <div class="rg-head">
+    <label class="rg-reviewed" title="Mark this group reviewed — commits the keep/trash choices below">
+      <input type="checkbox"{% if g.reviewed %} checked{% endif %}
+             hx-post="/groups/{{ g.group.id }}/reviewed?value={{ 0 if g.reviewed else 1 }}"
+             hx-target="#group-{{ g.group.id }}" hx-swap="outerHTML">
+      Reviewed
+    </label>
     <span class="rg-title">Group {{ g.group.id }} · {{ g.members | length }} photos</span>
     {% if g.confidence is not none and g.group.tier in ('near', 'similar') %}
     <span class="badge conf-badge">{{ (g.confidence * 100) | round | int }}% match</span>
     {% endif %}
     {% if g.group.color_variant %}<span class="badge">color variant</span>{% endif %}
-    {% if g.reviewed %}<span class="badge badge-ok">reviewed</span>{% endif %}
     <span class="rg-actions">
       {% if g.reclaim %}<span class="muted">frees {{ g.reclaim | filesizeformat }}</span>{% endif %}
       <button type="button" class="mini-btn"
