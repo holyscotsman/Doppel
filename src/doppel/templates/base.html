@@ -299,9 +299,64 @@
     .radio-row { display: flex; gap: 0.6rem; align-items: flex-start; font-size: 0.92rem;
                  max-width: 640px; cursor: pointer; }
     .radio-row input { margin-top: 0.25rem; }
+    /* ===== Orbit visual refresh ===== */
+    :root { --accent: #57e2ff; --accent2: #a970ff; }
+    body { background: #0a0920; }
+    .cosmos { position: fixed; inset: 0; z-index: -2; overflow: hidden; pointer-events: none;
+              background: radial-gradient(120% 120% at 50% 0%, #12102e, #0a0920 60%); }
+    .cosmos .neb { position: absolute; width: 130%; height: 150%; left: -15%; top: -30%;
+      background:
+        radial-gradient(45% 40% at 28% 26%, rgba(89,120,255,.30), transparent 70%),
+        radial-gradient(40% 45% at 76% 52%, rgba(169,112,255,.26), transparent 70%),
+        radial-gradient(34% 30% at 58% 88%, rgba(87,226,255,.14), transparent 70%);
+      filter: blur(26px);
+      transform: translate(calc(var(--px,0) * -14px), calc(var(--py,0) * -14px)); }
+    .cosmos .stars { position: absolute; inset: -20%;
+      background-image:
+        radial-gradient(1.4px 1.4px at 20px 30px, #fff, transparent),
+        radial-gradient(1.2px 1.2px at 120px 90px, #cfe0ff, transparent),
+        radial-gradient(1px 1px at 70px 160px, #fff, transparent);
+      background-size: 220px 220px; opacity: .5;
+      transform: translate(calc(var(--px,0) * -9px), calc(var(--py,0) * -9px)); }
+    header { background: rgba(14,13,38,.72); backdrop-filter: blur(14px);
+             border-bottom: 1px solid rgba(255,255,255,.08); }
+    header h1 a { background: linear-gradient(120deg, var(--accent), var(--accent2));
+                  -webkit-background-clip: text; background-clip: text;
+                  -webkit-text-fill-color: transparent; }
+    header nav { display: flex; gap: .3rem; align-items: center; }
+    header nav a { color: #aab0d8; padding: .35rem .85rem; border-radius: 999px; font-size: .9rem; }
+    header nav a:hover { background: rgba(255,255,255,.07); color: #fff; text-decoration: none; }
+    a { color: var(--accent); }
+    .card, .review-group, .review-controls, .review-bar, .setup-step, .browser,
+    .tier-link, .note, .banner, .brand-row, .pick-folder, .member, .trash-row {
+      background: rgba(22,22,50,.55) !important;
+      border-color: rgba(255,255,255,.09) !important; backdrop-filter: blur(10px); }
+    button, .scan-all-btn, a.wz-link, .wz-link, .google-btn {
+      background: linear-gradient(120deg, var(--accent), var(--accent2)); color: #06122a; }
+    .ghost-btn, .ghost-btn-link { background: transparent; color: #cdd2f0; }
+    .mini-btn { background: rgba(255,255,255,.06); color: #cdd2f0;
+                border-color: rgba(255,255,255,.14); }
+    .mini-btn:hover { background: rgba(255,255,255,.1); border-color: var(--accent); color: #fff; }
+    .mini-btn.mini-btn-on, .mini-btn.on {
+      background: linear-gradient(120deg, rgba(87,226,255,.25), rgba(169,112,255,.25));
+      color: #fff; border-color: rgba(120,180,255,.45); }
+    .tier-link.on { background: linear-gradient(120deg, rgba(87,226,255,.2), rgba(169,112,255,.2));
+                    border-color: rgba(120,180,255,.45); }
+    .tier-link:hover { border-color: var(--accent); }
+    /* 3D-tilted, glowing scan rings; upright centre */
+    .concentric { overflow: visible; filter: drop-shadow(0 14px 26px rgba(80,120,255,.42)); }
+    .cring-svg { transform: perspective(1000px) rotateX(34deg); overflow: visible; }
+    .cring--running { stroke: var(--accent);
+                      filter: drop-shadow(0 0 6px rgba(87,226,255,.85)); }
+    .lib-num, .cc-num { color: #eaf3ff; }
+    .ver-badge { position: fixed; right: 12px; bottom: 10px; z-index: 40; font-size: 11px;
+                 font-variant-numeric: tabular-nums; color: #99a0d0;
+                 background: rgba(14,13,38,.72); border: 1px solid rgba(255,255,255,.1);
+                 border-radius: 20px; padding: 4px 10px; backdrop-filter: blur(6px); }
   </style>
 </head>
 <body>
+<div class="cosmos" aria-hidden="true"><div class="stars"></div><div class="neb"></div></div>
 <script>
   // Tier click: reveal the review pane (animated split) and move the active
   // highlight, since the left nav isn't re-rendered when only the pane swaps.
@@ -327,6 +382,7 @@
 <main>
 {% block content %}{% endblock %}
 </main>
+<div class="ver-badge" title="version · build">{{ app_version }}</div>
 <div id="lightbox" class="lightbox" hidden>
   <img id="lightbox-img" src="" alt="">
   <div class="lb-cap" id="lightbox-cap"></div>
@@ -353,6 +409,14 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && !lb.hidden) closeLb();
     });
+    // ambient parallax: drift the cosmic background with the pointer
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      document.addEventListener('pointermove', function (e) {
+        var root = document.documentElement;
+        root.style.setProperty('--px', (e.clientX / window.innerWidth - 0.5).toFixed(3));
+        root.style.setProperty('--py', (e.clientY / window.innerHeight - 0.5).toFixed(3));
+      });
+    }
   })();
 </script>
 </body>

@@ -4,6 +4,7 @@ htmx); binds to 127.0.0.1 only (see Makefile run target)."""
 from __future__ import annotations
 
 import collections
+import functools
 import html
 import logging
 import sqlite3
@@ -59,6 +60,28 @@ from doppel.vlm import OllamaClient, VlmClient
 log = logging.getLogger("doppel")
 
 PACKAGE_DIR = Path(__file__).parent
+VERSION = "0.1.0"
+
+
+@functools.lru_cache(maxsize=1)
+def _app_version() -> str:
+    """Version string for the footer: the app version plus the short git SHA
+    (best effort — a checkout without git just shows the version)."""
+    sha = ""
+    try:
+        import subprocess
+
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(PACKAGE_DIR),
+            timeout=2,
+            check=False,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 — no git / not a repo: just show the version
+        pass
+    return f"v{VERSION}" + (f" · {sha}" if sha else "")
 
 # stages the UI can launch, in pipeline order; extended phase by phase
 UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
@@ -620,6 +643,7 @@ def create_app(
             app.state.vlm = None
 
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+    templates.env.globals["app_version"] = _app_version()
     app.mount(
         "/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static"
     )
