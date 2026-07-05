@@ -3,9 +3,12 @@ htmx); binds to 127.0.0.1 only (see Makefile run target)."""
 
 from __future__ import annotations
 
+import collections
 import html
+import logging
 import sqlite3
 import threading
+import time
 import traceback
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -53,6 +56,8 @@ from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
 from doppel.vlm import OllamaClient, VlmClient
 
+log = logging.getLogger("doppel")
+
 PACKAGE_DIR = Path(__file__).parent
 
 # stages the UI can launch, in pipeline order; extended phase by phase
@@ -60,6 +65,30 @@ UI_STAGES = ["sync", "exact", "near", "similar", "adjudicate"]
 
 # the core detection pipeline the "Run full scan" button chains, in order
 PIPELINE_STAGES = ["sync", "exact", "near", "similar"]
+
+
+def _pipeline_start_index(conn: sqlite3.Connection) -> int:
+    """Where to begin the 'all' pipeline. A fresh run — or one whose last attempt
+    fully completed — starts at sync (a full re-scan picks up new Drive files).
+    A RESUME after a downstream failure skips the leading stages that are already
+    'done' (above all the slow Drive re-list) and restarts at the first stage
+    that isn't done, so a Stage-3 failure resumes at Stage 3 instead of replaying
+    Stage 1."""
+    status: dict[str, str | None] = {}
+    for st in PIPELINE_STAGES:
+        row = conn.execute(
+            "SELECT status FROM scans WHERE stage = ? ORDER BY id DESC LIMIT 1",
+            (st,),
+        ).fetchone()
+        status[st] = row["status"] if row else None
+    # no completed sync yet, or the whole pipeline already finished -> full restart
+    if status["sync"] != "done" or all(status[st] == "done" for st in PIPELINE_STAGES):
+        return 0
+    for i, st in enumerate(PIPELINE_STAGES):
+        if status[st] != "done":
+            return i
+    return 0
+
 
 # plain-language names for the dashboard (the stage keys are jargon)
 STAGE_LABELS = {
@@ -119,6 +148,45 @@ def _scan_timing(scan: dict | None) -> tuple[str | None, str | None]:
         if remaining > 0:
             eta = _fmt_duration(remaining)
     return _fmt_duration(max(elapsed, 0)), eta
+
+
+class _RateEstimator:
+    """Sliding-window throughput for a live ETA. The scans row only stores a
+    running (processed, total); a cumulative processed/elapsed rate badly
+    overestimates the ETA early, because the first samples are dominated by
+    one-off startup cost (model load, first connections). This samples processed
+    over wall-clock time and projects from the most recent WINDOW_S seconds, so
+    the ETA tracks the true steady-state rate. Per-stage; resets when a new scan
+    of that stage starts. Thread-safe (the UI polls it from request threads)."""
+
+    WINDOW_S = 30.0
+
+    def __init__(self) -> None:
+        self._data: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def rate(
+        self, stage: str, scan_id: int, processed: int, now_ts: float
+    ) -> float | None:
+        """Items/second over the recent window, or None until there are enough
+        samples spanning real progress."""
+        with self._lock:
+            d = self._data.get(stage)
+            if d is None or d["scan_id"] != scan_id:
+                d = {"scan_id": scan_id, "samples": collections.deque(maxlen=600)}
+                self._data[stage] = d
+            samples: collections.deque = d["samples"]
+            if not samples or samples[-1][1] != processed:
+                samples.append((now_ts, processed))
+            while len(samples) >= 2 and now_ts - samples[0][0] > self.WINDOW_S:
+                samples.popleft()
+            if len(samples) < 2:
+                return None
+            span = samples[-1][0] - samples[0][0]
+            done = samples[-1][1] - samples[0][1]
+            if span <= 0 or done <= 0:
+                return None
+            return done / span
 
 
 HASH_BITS = 64  # pHash/dHash are 8x8 = 64-bit
@@ -464,6 +532,7 @@ def create_app(
     app = FastAPI(title="doppel")
     app.state.config = config
     app.state.runner = JobRunner()
+    app.state.rate = _RateEstimator()  # sliding-window ETA for running stages
     app.state.fetcher = None  # built lazily: needs OAuth credentials
     app.state.embedder = None  # built lazily: loads the CLIP model
     app.state.vlm = None  # built lazily: needs the Ollama server
@@ -553,8 +622,24 @@ def create_app(
                 (stage,),
             ).fetchone()
             scan = dict(row) if row else None
-            elapsed, eta = _scan_timing(scan)
+            elapsed, _ = _scan_timing(scan)  # elapsed only; ETA is windowed below
             state = scan["status"] if scan else "idle"
+            # ETA from the sliding-window rate (see _RateEstimator). Show
+            # "estimating…" while a stage runs but has no usable ETA yet: either
+            # the window has too little data, or the total isn't known (the sync
+            # stage paginates and only learns its total at the end).
+            eta: str | None = None
+            estimating = False
+            if state == "running" and scan:
+                if scan["total"] and scan["processed"]:
+                    rate = app.state.rate.rate(
+                        stage, scan["id"], scan["processed"], time.monotonic()
+                    )
+                    if rate:
+                        remaining = (scan["total"] - scan["processed"]) / rate
+                        if remaining > 0:
+                            eta = _fmt_duration(remaining)
+                estimating = eta is None
             # 0-1 fill for the progress ring; None while a running stage has no
             # known total yet (the ring shows an indeterminate spinner instead).
             if state == "done":
@@ -572,6 +657,7 @@ def create_app(
                     "scan": scan,
                     "elapsed": elapsed,
                     "eta": eta,
+                    "estimating": estimating,
                     "state": state,
                     "fraction": fraction,
                     "pct": None if fraction is None else round(fraction * 100),
@@ -607,7 +693,17 @@ def create_app(
         forever if the consent tab is missed."""
         conn = connect(config.db_path)
         try:
-            stages = PIPELINE_STAGES if stage == "all" else [stage]
+            if stage == "all":
+                start = _pipeline_start_index(conn)
+                stages = PIPELINE_STAGES[start:]
+                if start > 0:
+                    log.info(
+                        "resuming pipeline at %r (skipping completed %s)",
+                        stages[0],
+                        PIPELINE_STAGES[:start],
+                    )
+            else:
+                stages = [stage]
             for st in stages:
                 # a dependency failure happens before the stage's own
                 # start_scan, so record it in the ledger — otherwise the click
@@ -618,12 +714,16 @@ def create_app(
                     scan_id = start_scan(conn, st)
                     detail = exc.detail if isinstance(exc, HTTPException) else exc
                     fail_scan(conn, scan_id, f"{type(exc).__name__}: {detail}")
+                    log.warning("stage %s could not start: %s", st, detail)
                     return  # stop the pipeline on a dependency failure
                 try:
+                    log.info("stage %s starting", st)
                     job()
+                    log.info("stage %s finished", st)
                 except Exception:
                     # the stage recorded its own failure; stop the pipeline —
                     # later stages depend on this one's output
+                    log.exception("stage %s failed", st)
                     return
         finally:
             conn.close()
@@ -1746,6 +1846,10 @@ def create_app(
         try:
             path = fetcher.get(row["drive_id"], config.thumb_size)
         except FetchError as exc:
+            # transient under heavy review-while-scanning load (rate limit /
+            # blip). Logged so a burst of these is visible in logs/, not a 502
+            # that just looks like a broken image.
+            log.warning("thumb %s fetch failed: %s", photo_id, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return FileResponse(path, media_type="image/jpeg")
 
@@ -1754,5 +1858,9 @@ def create_app(
 
 def build() -> FastAPI:
     """uvicorn factory target (see Makefile run). Real runs get the daily-scan
-    scheduler; tests construct create_app() directly without it."""
+    scheduler and on-disk diagnostics (rotating app log + native-crash dumps in
+    logs/); tests construct create_app() directly without either."""
+    from doppel.logsetup import setup_diagnostics
+
+    setup_diagnostics(app_name="doppel")
     return create_app(enable_scheduler=True)

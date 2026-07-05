@@ -5,6 +5,7 @@ service_account.json
 
 # local data
 cache/
+logs/
 *.db
 *.db-wal
 *.db-shm

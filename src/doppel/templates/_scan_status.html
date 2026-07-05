@@ -81,7 +81,7 @@
           {% elif s and s.status == 'failed' %}<span class="error">failed</span>
           {% else %}<span class="muted">not run yet</span>{% endif %}
           {% if live %}
-            <span class="muted timing">{{ item.elapsed }} elapsed{% if item.eta %} · ~{{ item.eta }} left{% endif %}</span>
+            <span class="muted timing">{{ item.elapsed }} elapsed{% if item.eta %} · ~{{ item.eta }} left{% elif item.estimating %} · estimating…{% endif %}</span>
           {% elif s and s.status == 'done' and item.elapsed %}
             <span class="muted timing">took {{ item.elapsed }}</span>
           {% endif %}
