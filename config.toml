@@ -14,7 +14,9 @@ sort_folder_keyword = "sort" # folder-path substring that marks a "sort" inbox (
 
 [ollama]
 host = "http://127.0.0.1:11434"
-model = "gemma3:27b"         # any pulled multi-image vision model
+model = "gemma4:latest"      # any pulled multi-image vision model; fits 24GB RAM
+                             # (gemma3:27b is ~17GB and OOM-crashes an adjudicate
+                             # scan on a 24GB Mac — exit 139)
 adjudicate_band_min = 0.85   # pairs in [this, similar_cosine_min) go to the VLM
 
 # How hard to push the machine during the deeper scans. The fetch/hash/prefetch

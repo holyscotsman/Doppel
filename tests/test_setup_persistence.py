@@ -6,7 +6,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from doppel.app import _best_vision_model, _rank_vision_model, create_app
+from doppel.app import (
+    _best_vision_model,
+    _model_fits_host,
+    _model_param_billions,
+    _rank_vision_model,
+    create_app,
+)
 from tests.fakes import FakeImageFetcher
 
 
@@ -77,3 +83,35 @@ def test_best_model_falls_back_to_first_when_all_unknown() -> None:
 
 def test_best_model_none_for_empty_list() -> None:
     assert _best_vision_model([]) is None
+
+
+# ---- RAM-aware auto-pick (avoids the 17GB-on-24GB exit-139) --------------
+
+
+def test_param_billions_parsed_from_tag() -> None:
+    assert _model_param_billions("gemma3:27b") == 27.0
+    assert _model_param_billions("qwen2.5-vl:7b") == 7.0
+    assert _model_param_billions("gemma4:latest") is None  # unlabeled size
+    assert _model_param_billions("minicpm-v:latest") is None
+
+
+def test_model_fits_host_excludes_oversized_only() -> None:
+    # 24GB host: a 27b (~17.5GB + 8GB reserve = 25.5) does NOT fit; 9b does
+    assert not _model_fits_host("gemma3:27b", ram_gb=24.0)
+    assert _model_fits_host("llava:13b", ram_gb=24.0)
+    assert _model_fits_host("gemma4:latest", ram_gb=24.0)  # unknown -> fits
+    assert _model_fits_host("gemma3:27b", ram_gb=0.0)  # unknown host -> fits
+
+
+def test_best_model_skips_a_too_big_model_on_a_24gb_host() -> None:
+    # the real regression: on 24GB, don't auto-pick the 17GB gemma3:27b even
+    # though it outranks the smaller installed models
+    models = ["gemma3:27b", "gemma4:latest", "minicpm-v:latest"]
+    assert _best_vision_model(models, ram_gb=24.0) == "gemma4:latest"
+
+
+def test_best_model_falls_back_when_nothing_fits() -> None:
+    # a tiny host where even the smallest won't fit still gets a recommendation
+    # (best-ranked of the full list rather than None)
+    models = ["gemma3:27b", "llava:13b"]
+    assert _best_vision_model(models, ram_gb=8.0) == "gemma3:27b"  # best-ranked

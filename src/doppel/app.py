@@ -7,6 +7,8 @@ import collections
 import functools
 import html
 import logging
+import os
+import re
 import sqlite3
 import threading
 import time
@@ -585,9 +587,50 @@ def _rank_vision_model(name: str) -> int:
     return 0
 
 
-def _best_vision_model(models: list[str]) -> str | None:
-    """The best-ranked usable vision model, or None for an empty list."""
-    return max(models, key=_rank_vision_model, default=None)
+# A q4-quantized VLM resident footprint is ~0.65 GB per billion parameters;
+# leave headroom for CLIP/Torch, the app, and the OS so the adjudicate stage
+# does not push a small-RAM machine into an OOM segfault (exit 139). gemma3:27b
+# (~17 GB) does not fit alongside everything else on a 24 GB Mac.
+_GB_PER_BILLION_PARAMS = 0.65
+_VLM_RESERVE_GB = 8.0
+
+
+def _host_ram_gb() -> float:
+    """Total physical RAM in GB, or 0.0 when it can't be determined."""
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1e9
+    except (ValueError, OSError, AttributeError):
+        return 0.0
+
+
+def _model_param_billions(name: str) -> float | None:
+    """Parameter count parsed from a model tag ('gemma3:27b' -> 27.0), else None."""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*b\b", name.lower())
+    return float(match.group(1)) if match else None
+
+
+def _model_fits_host(name: str, ram_gb: float) -> bool:
+    """Whether the model's estimated footprint leaves the host enough headroom.
+    Unknown host RAM or an unlabeled model size is treated as fitting — never
+    exclude a model on a guess."""
+    if ram_gb <= 0:
+        return True
+    billions = _model_param_billions(name)
+    if billions is None:
+        return True
+    return billions * _GB_PER_BILLION_PARAMS + _VLM_RESERVE_GB <= ram_gb
+
+
+def _best_vision_model(models: list[str], ram_gb: float | None = None) -> str | None:
+    """The best-ranked usable vision model, preferring ones that fit in host RAM
+    so auto-select never recommends a model too large for the machine (the likely
+    cause of an adjudicate-stage exit-139). Falls back to the full list when
+    nothing fits, so a recommendation is still offered. None for an empty list."""
+    if not models:
+        return None
+    ram = _host_ram_gb() if ram_gb is None else ram_gb
+    fitting = [m for m in models if _model_fits_host(m, ram)]
+    return max(fitting or models, key=_rank_vision_model)
 
 
 def create_app(
