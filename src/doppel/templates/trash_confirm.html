@@ -24,12 +24,20 @@
   <div class="banner">
     {% if auth == 'oauth' %}
       Google Drive is connected <b>read-only</b>, so doppel can't move files to
-      Trash. Reconnect with a <b>service account</b> (the recommended path) and
-      share your folder with <b>edit</b> access, then come back here.
+      Trash yet. Reconnect your Google account granting <b>write</b> access — as
+      the file's owner you can then trash your own duplicates.
     {% else %}
       Connect Google Drive first, then mark duplicates for trash.
     {% endif %}
     <div style="margin-top:0.6rem"><a class="wz-link" href="/setup">Open setup</a></div>
+  </div>
+  {% elif auth == 'service_account' %}
+  <div class="banner">
+    <strong>Heads up:</strong> you're connected with a <b>service account</b>.
+    It can read your library, but Google Drive only lets a file's <em>owner</em>
+    move it to Trash — a service account isn't the owner of your personal files,
+    so this may fail for files you own. If it does, connect your own Google
+    account (with write access) so doppel can trash them as you.
   </div>
   {% endif %}
 

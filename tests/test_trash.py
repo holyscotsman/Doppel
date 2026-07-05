@@ -120,6 +120,9 @@ def test_trash_partial_failure_keeps_failed_active(config):
     assert resp.status_code == 200
     assert "1 photo moved to Trash" in resp.text
     assert "couldn't be moved" in resp.text
+    # the failure is explained in plain language, not dumped as raw Drive text
+    assert "Not yours to move" in resp.text
+    assert "insufficientFilePermissions" not in resp.text
 
     conn = connect(config.db_path)
     statuses = {
@@ -162,3 +165,41 @@ def test_can_trash_false_without_connection(config, tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)  # no token.json / service_account.json
     assert can_trash() is False
+
+
+def test_classify_trash_error_maps_permission_denied() -> None:
+    from doppel.drive import classify_trash_error
+
+    code, reason = classify_trash_error(
+        RuntimeError("insufficientFilePermissions: shared read-only")
+    )
+    assert code == "not_owner"
+    assert "owner" in reason.lower()
+    # a transient rate-limit is a different, non-ownership cause
+    rate = classify_trash_error(RuntimeError("userRateLimitExceeded"))
+    assert rate[0] == "rate_limited"
+
+
+def test_service_account_failure_explains_ownership(config, monkeypatch):
+    """When every file fails under a service account, the result page explains
+    the systemic cause (SA isn't the owner) once — not 22 raw error dumps."""
+    import doppel.app as appmod
+
+    monkeypatch.setattr(appmod, "auth_mode", lambda: "service_account")
+    fake = FakeTrashClient(fail_ids={"a", "b"})
+    app = create_app(
+        config=config,
+        fetcher_factory=lambda cfg: FakeImageFetcher(cfg.cache_dir),
+        trash_client_factory=lambda: fake,
+    )
+    conn = connect(config.db_path)
+    mark_trash(conn, "a", 100)
+    mark_trash(conn, "b", 200)
+    conn.close()
+
+    with TestClient(app) as c:
+        resp = c.post("/trash")
+    assert resp.status_code == 200
+    assert "No photos were moved" in resp.text
+    assert "service account" in resp.text  # the systemic explanation banner
+    assert "owner" in resp.text.lower()

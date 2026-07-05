@@ -14,16 +14,31 @@
 {% endif %}
 
 {% if failures %}
-<p class="error">{{ failures | length }} couldn't be moved
-  (often because the folder is shared read-only):</p>
-<ul class="trash-list">
-  {% for f in failures %}
-  <li class="trash-row"><div class="trash-meta">
-    <div class="trash-name">{{ f.name }}</div>
-    <div class="muted">{{ f.error }}</div>
-  </div></li>
-  {% endfor %}
-</ul>
+<p class="error">{{ failures | length }} couldn't be moved:</p>
+
+{% if owner_blocked and auth == 'service_account' %}
+<div class="banner">
+  <strong>Why did these fail?</strong> doppel is connected with a
+  <b>service account</b> — it can read your library, but it doesn't <b>own</b>
+  your files, and Google Drive only lets a file's <em>owner</em> move it to
+  Trash. To trash your own duplicates, doppel needs to act as <b>you</b>
+  (the owner) by connecting your Google account with write access. Files owned
+  by someone else and shared with you can't be trashed by anyone but their owner.
+</div>
+{% endif %}
+
+{% for reason, group in failures | groupby('reason') %}
+<div class="trash-failgroup">
+  <p class="muted"><strong>{{ group | list | length }}</strong> — {{ reason }}</p>
+  <ul class="trash-list">
+    {% for f in group %}
+    <li class="trash-row"><div class="trash-meta">
+      <div class="trash-name">{{ f.name }}</div>
+    </div></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endfor %}
 {% endif %}
 
 <div class="trash-actions">

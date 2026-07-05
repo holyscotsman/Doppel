@@ -117,6 +117,35 @@ class TrashNotAuthorized(RuntimeError):
     """Drive is connected read-only; moving files to Trash needs write access."""
 
 
+def classify_trash_error(exc: Exception) -> tuple[str, str]:
+    """Map a failed move-to-trash to a (code, human-readable reason) pair so the
+    UI can group failures by cause instead of dumping raw Drive HttpError text.
+
+    The dominant real-world cause is that the connected identity is not the
+    file's OWNER: Google Drive only lets an owner set trashed=true, so a service
+    account — or any non-owner, even one with edit access to a shared folder —
+    gets 403 insufficientFilePermissions."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    text = str(exc).lower()
+    if (
+        "insufficientfilepermissions" in text
+        or "does not have sufficient permission" in text
+        or "shared read-only" in text
+        or status == 403
+    ):
+        return (
+            "not_owner",
+            "Not yours to move — Google Drive only lets a file's owner send it to "
+            "Trash. The connected account isn't the owner (or reached the file "
+            "through a read-only share).",
+        )
+    if status == 404 or "notfound" in text or "not found" in text:
+        return ("missing", "Already gone from Drive — nothing left to move.")
+    if status == 429 or "ratelimit" in text or "rate limit" in text:
+        return ("rate_limited", "Drive rate-limited the request — try again shortly.")
+    return ("other", "Drive refused the request.")
+
+
 def load_service_account_credentials(
     path: Path | str = SERVICE_ACCOUNT_PATH,
     scopes: list[str] | None = None,

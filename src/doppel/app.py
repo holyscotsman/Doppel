@@ -37,6 +37,7 @@ from doppel.drive import (
     GoogleDriveClient,
     ImageFetcher,
     TrashNotAuthorized,
+    classify_trash_error,
     get_credentials,
     is_service_account_key,
     load_service_account_credentials,
@@ -2191,7 +2192,9 @@ def create_app(
             try:
                 client.trash_file(row["drive_id"])
             except Exception as exc:  # noqa: BLE001 — surfaced per-file to the user
-                failures.append({"name": row["name"], "error": str(exc)})
+                code, reason = classify_trash_error(exc)
+                log.warning("move-to-trash failed for %s: %s", row["name"], exc)
+                failures.append({"name": row["name"], "code": code, "reason": reason})
                 continue
             conn.execute(
                 "UPDATE photos SET status = 'trashed' WHERE id = ?", (row["id"],)
@@ -2199,10 +2202,20 @@ def create_app(
             moved += 1
             freed += row["size"] or 0
         conn.commit()
+        # A service account can READ the library but never OWNS the user's files,
+        # so ownership failures under it are systemic, not per-file — flag that so
+        # the result page explains it once and points to the real remedy.
+        owner_blocked = sum(1 for f in failures if f["code"] == "not_owner")
         return templates.TemplateResponse(
             request,
             "trash_result.html",
-            {"moved": moved, "freed": freed, "failures": failures},
+            {
+                "moved": moved,
+                "freed": freed,
+                "failures": failures,
+                "auth": auth_mode(),
+                "owner_blocked": owner_blocked,
+            },
         )
 
     @app.get("/export")
