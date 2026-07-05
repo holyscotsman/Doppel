@@ -48,6 +48,12 @@
           {% if daily_enabled %}✓ auto-scan daily: on{% else %}auto-scan daily: off{% endif %}
         </button>
       </form>
+      <form method="post" action="/boost" style="margin:0">
+        <button type="submit" class="mini-btn {% if boost_enabled %}mini-btn-on{% endif %}"
+                title="Max out fetch + GPU throughput for scans. Faster, but may draw Drive rate limits.">
+          {% if boost_enabled %}⚡ boost: on{% else %}⚡ boost: off{% endif %}
+        </button>
+      </form>
       {% if last_full_scan %}<span class="muted tiny">last: {{ last_full_scan }}</span>{% endif %}
     </div>
 

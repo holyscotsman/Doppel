@@ -109,6 +109,16 @@ REVIEW_MODES = ("scroll", "all", "batch")
 # larger preview served to the review lightbox — a size-parameterized thumbnail
 # (never the original), so clicking a photo stays fast and within the fetcher
 LIGHTBOX_SIZE = 1600
+# "Boost scan" perf overrides: max out the I/O pools and the GPU batch. Aggressive
+# on purpose — the fetcher jitters and logs its 429 backoff — and toggled from the
+# dashboard. On a large library this trades politeness to the Drive CDN for speed.
+BOOST_PERF = {
+    "fetch_workers": 64,
+    "hash_workers": 64,
+    "embed_fetch_workers": 64,
+    "clip_batch": 96,
+    "queue_maxsize": 128,
+}
 
 REVIEWED_FILTERS = {
     "all": "",
@@ -691,26 +701,55 @@ def create_app(
             )
         return overview
 
+    def _unload_embedder() -> None:
+        """Drop the in-memory CLIP model to free unified memory before the VLM
+        loads — keeping both resident on a 24GB machine is a memory-pressure
+        (and native-crash) risk. Safe no-op if it was never built."""
+        if app.state.embedder is not None:
+            app.state.embedder = None
+            try:
+                import torch
+
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+            except Exception:  # noqa: BLE001 — torch absent / not MPS: best effort
+                pass
+
+    def _effective_config(conn: sqlite3.Connection) -> Config:
+        """The config for this run — boosted perf when the user turned Boost on
+        (max out the I/O pools and GPU batch, at the cost of possible CDN rate
+        limiting, which the fetcher jitters and logs)."""
+        if get_meta(conn, "boost", "off") != "on":
+            return config
+        import dataclasses
+
+        return dataclasses.replace(
+            config, perf=dataclasses.replace(config.perf, **BOOST_PERF)
+        )
+
     def _build_stage_callable(
-        conn: sqlite3.Connection, stage: str
+        conn: sqlite3.Connection, stage: str, cfg: Config
     ) -> Callable[[], object]:
-        """Acquire a stage's dependencies and return a zero-arg runner. Raises
-        if a dependency (credentials, model, shared folders) is unavailable."""
+        """Acquire a stage's dependencies and return a zero-arg runner. Raises if
+        a dependency (credentials, model, shared folders) is unavailable. cfg is
+        the effective config for this run (boosted perf when Boost is on)."""
         if stage == "sync":
             client = drive_client_factory()
-            folder_ids = _resolve_scan_roots(client, config)
-            return lambda: run_sync(conn, client, config.cache_dir, folder_ids)
+            folder_ids = _resolve_scan_roots(client, cfg)
+            return lambda: run_sync(conn, client, cfg.cache_dir, folder_ids)
         if stage == "exact":
             return lambda: run_exact(conn)
         if stage == "near":
             fetcher = get_fetcher()
-            return lambda: run_near(conn, fetcher, config)
+            return lambda: run_near(conn, fetcher, cfg)
         if stage == "similar":
             fetcher, embedder = get_fetcher(), get_embedder()
-            return lambda: run_similar(conn, fetcher, embedder, config)
+            return lambda: run_similar(conn, fetcher, embedder, cfg)
         if stage == "adjudicate":
+            # free the CLIP model before the VLM loads (memory-safe on 24GB)
+            _unload_embedder()
             fetcher, vlm = get_fetcher(), get_vlm()
-            return lambda: run_adjudicate(conn, fetcher, vlm, config)
+            return lambda: run_adjudicate(conn, fetcher, vlm, cfg)
         raise ValueError(f"unknown stage {stage!r}")
 
     def run_stage_job(stage: str) -> None:
@@ -730,12 +769,13 @@ def create_app(
                     )
             else:
                 stages = [stage]
+            cfg = _effective_config(conn)  # boosted perf when Boost is on
             for st in stages:
                 # a dependency failure happens before the stage's own
                 # start_scan, so record it in the ledger — otherwise the click
                 # would look like a silent no-op in the UI
                 try:
-                    job = _build_stage_callable(conn, st)
+                    job = _build_stage_callable(conn, st, cfg)
                 except Exception as exc:
                     scan_id = start_scan(conn, st)
                     detail = exc.detail if isinstance(exc, HTTPException) else exc
@@ -788,6 +828,15 @@ def create_app(
         """Turn the daily automatic full scan on or off."""
         current = get_meta(conn, "daily_scan", "off")
         set_meta(conn, "daily_scan", "off" if current == "on" else "on")
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/boost")
+    def toggle_boost(conn: sqlite3.Connection = Depends(get_conn)):
+        """Toggle Boost — later scans max out the fetch/embed pools and the GPU
+        batch (BOOST_PERF). Faster on a fast link, but more likely to draw Drive
+        CDN rate limits, which the fetcher jitters and logs."""
+        current = get_meta(conn, "boost", "off")
+        set_meta(conn, "boost", "off" if current == "on" else "on")
         return RedirectResponse("/", status_code=303)
 
     @app.get("/settings", response_class=HTMLResponse)
@@ -1151,6 +1200,7 @@ def create_app(
             "needs_setup": auth_mode() is None,
             "folder_id": config.drive_folder_id,
             "daily_enabled": get_meta(conn, "daily_scan", "off") == "on",
+            "boost_enabled": get_meta(conn, "boost", "off") == "on",
             "last_full_scan": last_full["finished_at"] if last_full else None,
             "interrupted_stage": interrupted["stage"] if interrupted else None,
         }

@@ -5,12 +5,16 @@ Scope is drive.readonly — v1 never modifies anything in Drive.
 
 from __future__ import annotations
 
+import logging
+import random
 import re
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Protocol
+
+log = logging.getLogger("doppel.fetch")
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 # Write scope used ONLY by the explicit, confirmed move-to-trash action. The
@@ -523,6 +527,15 @@ class DriveImageFetcher:
                 f"not a decodable image ({type(exc).__name__})"
             ) from exc
 
+    def _backoff(self, attempt: int, reason: str) -> None:
+        """Sleep 2**attempt seconds plus up to 0.5s of jitter. The jitter
+        de-syncs the many worker threads (especially under Boost) so they don't
+        all retry a rate-limited CDN in lockstep. Logged so a 429 burst is
+        visible in logs/ instead of looking like a stall."""
+        delay = 2**attempt + random.uniform(0, 0.5)
+        log.info("fetch backoff %.1fs (retry %d): %s", delay, attempt + 1, reason)
+        self._sleep(delay)
+
     def _request(self, url: str, retry_403: bool = False) -> Any:
         """GET with exponential backoff on 429/5xx (and 403 when asked), and on
         transient transport errors (reset connection, read timeout). With a
@@ -537,7 +550,7 @@ class DriveImageFetcher:
             except Exception as exc:  # noqa: BLE001 — retried, then surfaced as FetchError
                 if last:
                     raise FetchError(f"thumbnail request failed: {exc}") from exc
-                self._sleep(2**attempt)
+                self._backoff(attempt, str(exc))
                 continue
             retryable = (
                 resp.status_code == 429
@@ -545,7 +558,7 @@ class DriveImageFetcher:
                 or (retry_403 and resp.status_code == 403)
             )
             if retryable and not last:
-                self._sleep(2**attempt)
+                self._backoff(attempt, f"HTTP {resp.status_code}")
                 continue
             return resp
         return resp

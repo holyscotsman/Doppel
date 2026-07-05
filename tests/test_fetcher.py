@@ -117,7 +117,9 @@ def test_backoff_on_transient_errors(db_path, tmp_path) -> None:
     path = fetcher.get("pic1", 512)
 
     assert path.read_bytes() == body
-    assert sleeps == [1, 2]
+    # exponential backoff (1s, 2s) plus up to 0.5s of anti-lockstep jitter
+    assert [int(s) for s in sleeps] == [1, 2]
+    assert all(0 <= s - int(s) < 0.5 for s in sleeps)
 
 
 def test_persistent_failure_raises_fetch_error(db_path, tmp_path) -> None:
@@ -157,7 +159,7 @@ def test_403_on_refreshed_link_backs_off(db_path, tmp_path) -> None:
         fetcher.get("pic1", 512)
 
     assert client.link_requests == ["pic1"]  # exactly one refresh
-    assert sleeps == [1, 2, 4]  # backoff between retries, none after the last
+    assert [int(s) for s in sleeps] == [1, 2, 4]  # backoff (+jitter), none after last
 
 
 def test_no_sleep_after_final_attempt(db_path, tmp_path) -> None:
@@ -167,7 +169,7 @@ def test_no_sleep_after_final_attempt(db_path, tmp_path) -> None:
     with pytest.raises(FetchError):
         fetcher.get("pic1", 512)
 
-    assert sleeps == [1, 2, 4]  # not [1, 2, 4, 8]
+    assert [int(s) for s in sleeps] == [1, 2, 4]  # not [1, 2, 4, 8]
 
 
 def test_stale_link_with_no_replacement_falls_back_to_original(
@@ -322,4 +324,4 @@ def test_transient_transport_error_is_retried(db_path, tmp_path) -> None:
 
     assert path.exists()
     assert session.calls == 3  # two failures, then success
-    assert sleeps == [1, 2]  # exponential backoff before each retry
+    assert [int(s) for s in sleeps] == [1, 2]  # backoff (1s, 2s) + jitter
