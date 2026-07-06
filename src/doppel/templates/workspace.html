@@ -36,6 +36,10 @@
         <span class="tier-count" id="tier-count-{{ t }}">{{ tier_counts.get(t, 0) }}</span>
       </a>
       {% endfor %}
+      <a class="tier-link" href="/webp">
+        <span class="tier-name">🖼 WebP → PNG</span>
+        <span class="tier-count" id="tier-count-webp">{{ webp_count or 0 }}</span>
+      </a>
       <a class="tier-link trash-link" href="/trash/confirm">
         <span class="tier-name">🗑 Trash queue{% if reclaim_total %} · {{ reclaim_total | filesizeformat }}{% endif %}</span>
         <span class="tier-count" id="tier-count-trash">{{ trash_count }}</span>

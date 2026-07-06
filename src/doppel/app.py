@@ -60,7 +60,12 @@ from doppel.stages.exact import run_exact
 from doppel.stages.near import run_near
 from doppel.stages.similar import run_similar
 from doppel.vlm import OllamaClient, VlmClient
-from doppel.webpconv import convert_library_webp
+from doppel.webpconv import (
+    conversion_history,
+    convert_library_webp,
+    pending_webp_count,
+    pending_webps,
+)
 
 log = logging.getLogger("doppel")
 
@@ -1378,6 +1383,7 @@ def create_app(
             "tier_counts": tier_counts,
             "trash_count": trash_count,
             "reclaim_total": reclaim_total,
+            "webp_count": pending_webp_count(conn, config.webp.trash_folder),
             "scans": scan_overview(conn),
             "any_running": app.state.runner.running_stage() is not None,
             "needs_setup": auth_mode() is None,
@@ -2284,6 +2290,64 @@ def create_app(
                 "owner_connected": trash_owner_connected(),
             },
         )
+
+    def _webp_ctx(conn: sqlite3.Connection) -> dict:
+        pending = pending_webps(conn, config.webp.trash_folder)
+        history = conversion_history(conn)
+        converted = sum(1 for h in history if h["status"] == "converted")
+        skipped = sum(1 for h in history if h["status"] == "skipped")
+        return {
+            "pending": pending,
+            "pending_count": len(pending),
+            "pending_bytes": sum((r["size"] or 0) for r in pending),
+            "history": history,
+            "converted_count": converted,
+            "skipped_count": skipped,
+            "owner_connected": trash_owner_connected(),
+            "auto_on": config.webp.convert_after_scan,
+            "trash_folder": config.webp.trash_folder,
+        }
+
+    @app.get("/webp", response_class=HTMLResponse)
+    def webp_page(
+        request: Request,
+        msg: str | None = None,
+        err: str | None = None,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        ctx = _webp_ctx(conn)
+        ctx["msg"] = msg
+        ctx["error"] = err
+        return templates.TemplateResponse(request, "webp.html", ctx)
+
+    @app.post("/webp/convert")
+    def webp_convert():
+        """Convert the detected WebPs to lossless PNG now (also runs automatically
+        after a scan when [webp] convert_after_scan is on). Owner sign-in required
+        — a service account can't create/move the user's files."""
+        from urllib.parse import quote
+
+        if not trash_owner_connected():
+            note = (
+                "Connect your Google account first — you're the owner, and only "
+                "you can create and move your files."
+            )
+            return RedirectResponse("/webp?err=" + quote(note), status_code=303)
+
+        def job() -> None:
+            work = connect(config.db_path)
+            try:
+                convert_library_webp(
+                    work, trash_client_factory(), trash_folder=config.webp.trash_folder
+                )
+            finally:
+                work.close()
+
+        if not app.state.runner.start("webp", job):
+            busy = "A scan or job is running — try again once it finishes."
+            return RedirectResponse("/webp?err=" + quote(busy), status_code=303)
+        started = "Converting in the background — reload to see progress."
+        return RedirectResponse("/webp?msg=" + quote(started), status_code=303)
 
     @app.get("/export")
     def export_csv(conn: sqlite3.Connection = Depends(get_conn)):

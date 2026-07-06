@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}WebP → PNG · doppel{% endblock %}
+{% block content %}
+<div class="review-head">
+  <h2>WebP → PNG</h2>
+  <span class="muted rh-stats">
+    {{ pending_count }} WebP{{ 's' if pending_count != 1 else '' }} detected
+    {%- if converted_count %} · {{ converted_count }} already converted{% endif %}
+  </span>
+</div>
+
+<div class="note reassure">
+  <strong>Lossless &amp; reversible.</strong> Each WebP is re-encoded as a
+  <b>PNG</b> in the same folder — the pixels (and any transparency) are preserved
+  exactly. The original WebP is then <b>moved</b> into
+  <b>{{ trash_folder }}</b>, never deleted, so you can restore it any time.
+  Animated WebPs are skipped (PNG can't hold animation).
+</div>
+
+{% if msg %}<div class="note reassure">{{ msg }}</div>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if not owner_connected %}
+<div class="banner">
+  Converting creates and moves files in your Drive, so it runs as <b>you</b> (the
+  owner) — a service account can't. Connect your Google account to enable it:
+  <form method="post" action="/oauth/trash/start" style="margin-top:0.6rem">
+    <button type="submit" class="danger-btn">🔑 Connect my Google account</button>
+  </form>
+</div>
+{% endif %}
+
+{% if pending_count %}
+<p><b>{{ pending_count }}</b> WebP{{ 's' if pending_count != 1 else '' }} to convert,
+   totalling <b>{{ pending_bytes | filesizeformat }}</b>.
+   {% if auto_on %}<span class="muted">Auto-conversion after scans is <b>on</b>.</span>
+   {% else %}<span class="muted">Auto-conversion after scans is off — convert here, or
+   enable <code>[webp] convert_after_scan</code> in config.</span>{% endif %}</p>
+
+<div class="trash-actions">
+  {% if owner_connected %}
+  <form method="post" action="/webp/convert" style="margin:0"
+        onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Converting…';">
+    <button type="submit" class="danger-btn">
+      Convert {{ pending_count }} WebP{{ 's' if pending_count != 1 else '' }} to PNG
+    </button>
+  </form>
+  {% endif %}
+  <a class="ghost-btn-link" href="/">Back to dashboard</a>
+</div>
+
+<ul class="trash-list">
+  {% for p in pending %}
+  <li class="trash-row">
+    <img class="thumb" loading="lazy" src="/thumb/{{ p.id }}" alt="{{ p.name }}">
+    <div class="trash-meta">
+      <div class="trash-name">{{ p.name }}</div>
+      <div class="muted">{{ (p.size | filesizeformat) if p.size else "? size" }}</div>
+      {% if p.folder_path %}<div class="rg-path">📁 {{ p.folder_path }}</div>{% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="muted empty">No WebP files waiting to convert. New WebPs found on your
+  next scan will show up here{% if auto_on %} and convert automatically{% endif %}.</p>
+{% endif %}
+
+{% if history %}
+<details class="ref-config">
+  <summary>Conversion history · {{ converted_count }} converted, {{ skipped_count }} skipped</summary>
+  <ul class="trash-list">
+    {% for h in history %}
+    <li class="trash-row"><div class="trash-meta">
+      <div class="trash-name">
+        {% if h.status == 'converted' %}✅{% else %}⏭{% endif %}
+        {{ h.name or h.source_drive_id }}
+      </div>
+      <div class="muted tiny">
+        {{ h.status }}{% if h.reason %} — {{ h.reason }}{% endif %} · {{ h.converted_at }}
+      </div>
+    </div></li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{% endblock %}

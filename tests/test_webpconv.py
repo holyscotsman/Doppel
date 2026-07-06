@@ -6,15 +6,17 @@ from __future__ import annotations
 
 import io
 
+from fastapi.testclient import TestClient
 from PIL import Image
 
+from doppel.app import create_app
 from doppel.db import connect
 from doppel.webpconv import (
     convert_library_webp,
     convert_webp_to_png,
     png_name_for,
 )
-from tests.fakes import insert_photo
+from tests.fakes import FakeImageFetcher, insert_photo
 
 
 def _webp(mode: str = "RGB", color=(200, 120, 60), size=(8, 8)) -> bytes:
@@ -211,3 +213,33 @@ def test_lookalike_folder_is_not_wildcard_excluded(config) -> None:
     summary = convert_library_webp(conn, client, trash_folder="WEBP_Trash")
     assert summary["converted"] == 1  # NOT wrongly excluded by the '_' wildcard
     conn.close()
+
+
+# ---- the /webp page ------------------------------------------------------
+
+
+def test_webp_page_lists_detected_files(config) -> None:
+    conn = connect(config.db_path)
+    _webp_photo(conn, "w1", "logo.webp", parent_id="f")
+    conn.close()
+    app = create_app(
+        config=config, fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir)
+    )
+    with TestClient(app) as client:
+        page = client.get("/webp").text
+    assert "WebP → PNG" in page
+    assert "logo.webp" in page  # the detected file is listed
+    assert "1 WebP detected" in page
+
+
+def test_webp_convert_requires_owner_signin(config, monkeypatch) -> None:
+    import doppel.app as appmod
+
+    monkeypatch.setattr(appmod, "trash_owner_connected", lambda: False)
+    app = create_app(
+        config=config, fetcher_factory=lambda c: FakeImageFetcher(c.cache_dir)
+    )
+    with TestClient(app) as client:
+        resp = client.post("/webp/convert", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/webp?err=" in resp.headers["location"]  # prompts the owner sign-in

@@ -103,7 +103,7 @@ def pending_webps(conn: sqlite3.Connection, trash_folder: str) -> list[sqlite3.R
     esc = trash_folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return conn.execute(
         """
-        SELECT drive_id, name, parent_id, folder_path, size
+        SELECT id, drive_id, name, parent_id, folder_path, size
         FROM photos
         WHERE mime_type = 'image/webp' AND status = 'active'
           AND (folder_path IS NULL OR folder_path NOT LIKE ? ESCAPE '\\')
@@ -111,6 +111,35 @@ def pending_webps(conn: sqlite3.Connection, trash_folder: str) -> list[sqlite3.R
         ORDER BY size DESC, name
         """,
         (f"%{esc}%",),
+    ).fetchall()
+
+
+def pending_webp_count(conn: sqlite3.Connection, trash_folder: str) -> int:
+    """How many WebPs are still awaiting conversion — for the nav badge (a lean
+    COUNT rather than materializing every row)."""
+    esc = trash_folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM photos "
+        "WHERE mime_type = 'image/webp' AND status = 'active' "
+        "AND (folder_path IS NULL OR folder_path NOT LIKE ? ESCAPE '\\') "
+        "AND drive_id NOT IN (SELECT source_drive_id FROM webp_conversions)",
+        (f"%{esc}%",),
+    ).fetchone()["n"]
+
+
+def conversion_history(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    """Recent conversion outcomes (converted + skipped), newest first, joined to
+    the photo name when it's still known."""
+    return conn.execute(
+        """
+        SELECT c.source_drive_id, c.png_drive_id, c.status, c.reason, c.converted_at,
+               p.name AS name
+        FROM webp_conversions c
+        LEFT JOIN photos p ON p.drive_id = c.source_drive_id
+        ORDER BY c.converted_at DESC
+        LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
 
 
